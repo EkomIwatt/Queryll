@@ -69,6 +69,13 @@ qualifying that "heading" has stopped meaning anything — detection is switched
 whole document and every chunk gets `heading_path = NULL`. A wrong heading is printed under a
 citation as if it were fact, so no heading is strictly better than a plausible wrong one.
 
+The same instinct demotes a document's **title**. A paper's title is the largest type on the
+page, so font-based detection quite correctly calls it a heading — and then every citation in
+the document reads `Whole Paper Title > 3. Methods > 3.2 Sampling`, with a first segment that
+repeats what the filename already says. When the evidence is unambiguous (the first line is a
+heading, it is the only one at the largest size, and there are levels beneath it) the title
+becomes content, and paths come out as Contract 5's own example has them.
+
 Reading order is solved before any of that: a vertical whitespace gutter splits a page into
 columns, and page-spanning lines split it into bands first, so a full-width title above a
 two-column body does not hide the gutter underneath it.
@@ -199,6 +206,13 @@ What the suite is actually for:
 | `test_pipeline.py` | `pending → processing → ready` with progress visible mid-run; permanent failures that do not burn three attempts; a third attempt that fails for good. |
 | `test_quality.py` | Whether the passage that answers a question survives chunking in one piece — the only test that would catch a chunking change making the product worse. |
 
+One test in `test_chunking.py` is a **complexity guard** rather than a correctness check: it
+chunks a 1.3 MB document and fails if that takes more than twenty seconds. An innocuous
+`text[:offset]` inside the sentence splitter once copied the whole document at every sentence
+boundary, which took a two-megabyte file from one second to over seven minutes — invisible on
+any fixture, and fatal at the 20 MB Contract 5 §1 allows. The bound is loose on purpose: it is
+there to catch a change of complexity class, not to measure the machine.
+
 Regenerating fixtures (rarely needed — they are committed):
 
 ```bash
@@ -217,5 +231,6 @@ python tools/make_fixtures.py
   approximate by design (see `chunking/tokenizer.py` for why exactness would break Contract 5
   §4). Nothing depends on it being exact, but it is worth knowing before someone reads it as
   gospel.
-- **The kill-the-worker check.** Idempotence and reclaim are tested, but only against a real
-  process killed mid-run does the whole story hold together.
+- **The kill-the-worker check has been run here, against the real process** — killed mid-run,
+  left `running` with no chunks written, reclaimed after the window on attempt 2, finished with
+  exactly one set of 1200 chunks. Worth repeating on Render, where the restart is real.
