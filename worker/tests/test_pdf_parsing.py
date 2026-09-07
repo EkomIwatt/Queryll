@@ -171,3 +171,37 @@ def test_extraction_is_deterministic() -> None:
     assert first.text == second.text
     assert first.blocks == second.blocks
     assert first.pages == second.pages
+
+
+def test_the_document_title_is_not_the_root_of_every_heading_path(paper) -> None:  # type: ignore[no-untyped-def]
+    """Contract 5's example is "3. Methods > 3.2 Sampling", not "<Whole Title> > 3. Methods".
+
+    A paper's title is set in the largest type on the page, so font-based detection correctly
+    calls it a heading — and then every citation in the document repeats information the
+    filename already carries.
+    """
+    from queryll_worker.chunking import chunk_document
+    from queryll_worker.config import ChunkingSettings
+
+    paths = [
+        chunk.heading_path
+        for chunk in chunk_document(paper, ChunkingSettings())
+        if chunk.heading_path
+    ]
+    assert paths, "the paper should produce heading paths at all"
+    assert not any(path.startswith(RUNNING_HEADER) for path in paths)
+    assert "3. Methods > 3.2 Sampling" in paths
+
+
+def test_a_first_heading_that_is_a_real_section_is_kept() -> None:
+    """The demotion only fires on an unambiguous title, never on a leading section heading."""
+    from queryll_worker.parsing.pdf import _demote_document_title
+
+    # One largest heading, first, with deeper levels below it: a title.
+    assert _demote_document_title([1, 2, 3, 2]) == [None, 2, 3, 2]
+    # Two headings share the largest size, so neither is a title.
+    assert _demote_document_title([1, 2, 1, 2]) == [1, 2, 1, 2]
+    # Nothing beneath it: a one-level document, not a title page.
+    assert _demote_document_title([1, None, None]) == [1, None, None]
+    # The document does not open with a heading at all.
+    assert _demote_document_title([None, 1, 2]) == [None, 1, 2]

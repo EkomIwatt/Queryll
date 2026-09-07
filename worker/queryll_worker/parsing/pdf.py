@@ -312,7 +312,7 @@ def extract_pdf(content: bytes, *, max_pages: int) -> ExtractedDocument:
     metrics = _column_metrics(body)
     line_height = _median_line_height(body)
 
-    levels = [model.level_for(line) for line in body]
+    levels = _demote_document_title([model.level_for(line) for line in body])
 
     groups: list[list[Line]] = [[body[0]]]
     group_levels: list[int | None] = [levels[0]]
@@ -355,6 +355,28 @@ def extract_pdf(content: bytes, *, max_pages: int) -> ExtractedDocument:
         page_count=page_count,
         headings_reliable=model.reliable,
     )
+
+
+def _demote_document_title(levels: list[int | None]) -> list[int | None]:
+    """Treat a document's title as content rather than as the root of every heading path.
+
+    A paper's title is set in the largest type on the page, so font-based detection quite
+    correctly calls it a heading — and then every citation in the document reads
+    "Whole Paper Title > 3. Methods > 3.2 Sampling", with the first segment repeating
+    information the filename already carries. Contract 5's own example is "3. Methods >
+    3.2 Sampling", with no title in front of it.
+
+    Demoted only when the evidence is unambiguous: the very first line of the document is a
+    heading, it is the *only* heading at the largest size, and there are other heading levels
+    beneath it. A document whose first heading is a real section keeps it.
+    """
+    if not levels or levels[0] != 1:
+        return levels
+    if sum(1 for level in levels if level == 1) != 1:
+        return levels
+    if not any(level is not None and level > 1 for level in levels):
+        return levels
+    return [None, *levels[1:]]
 
 
 def _page_spans(marks: Sequence[tuple[int, int]], total: int) -> tuple[PageSpan, ...]:

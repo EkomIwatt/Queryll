@@ -30,6 +30,10 @@ _ABBREVIATIONS = frozenset(
 _BOUNDARY_RE = re.compile(r"[.!?…]['\"’”)\]]*(?=\s)")  # noqa: RUF001 - curly quotes are real punctuation
 #: The token immediately before the punctuation, used for the abbreviation check.
 _TRAILING_WORD_RE = re.compile(r"([A-Za-z][A-Za-z.]*)$")
+#: How far back to look for that token. Only the word touching the punctuation matters, and
+#: taking the whole prefix instead would copy the document once per sentence — which turns
+#: chunking a large file from linear into quadratic.
+_LOOKBEHIND = 48
 _OPENERS = "\"'‘“([{"  # noqa: RUF001 - curly quotes are real punctuation
 
 
@@ -38,7 +42,7 @@ def _is_boundary(text: str, punct_index: int, next_index: int) -> bool:
     if text[punct_index] in "!?…":
         return True
 
-    prefix = text[:punct_index]
+    prefix = text[max(0, punct_index - _LOOKBEHIND) : punct_index]
     match = _TRAILING_WORD_RE.search(prefix)
     if match:
         word = match.group(1)

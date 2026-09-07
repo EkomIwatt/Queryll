@@ -250,6 +250,21 @@ def _merge_short(
     return merged
 
 
+def _path_for(units: list[_Unit], group: list[int]) -> str | None:
+    """The heading path to show under a citation of this chunk.
+
+    Normally the chunk opens with its own heading, because packing forces a boundary there,
+    and the first unit's path is the answer. The exception is a chunk that begins in matter
+    before any heading — a paper's title block, a preamble — where the first unit has no path
+    at all. Falling through to the first heading the chunk *does* contain labels that passage
+    with the section it is mostly made of, rather than with nothing.
+    """
+    for index in group:
+        if units[index].heading_path:
+            return units[index].heading_path
+    return None
+
+
 def chunk_document(
     document: ExtractedDocument, settings: ChunkingSettings | None = None
 ) -> list[ChunkCandidate]:
@@ -278,7 +293,7 @@ def chunk_document(
 
         text = document.text[start:end]
         page_start, page_end = page_range(document.pages, start, end)
-        heading_path = units[group[0]].heading_path if document.headings_reliable else None
+        heading_path = _path_for(units, group) if document.headings_reliable else None
 
         candidates.append(
             ChunkCandidate(

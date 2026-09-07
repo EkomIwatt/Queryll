@@ -7,6 +7,7 @@ path and "log the document" is not something you reach for by accident.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
 from typing import Any
@@ -20,6 +21,13 @@ def configure_logging(level: str = "INFO") -> None:
     if _CONFIGURED:
         logging.getLogger().setLevel(level)
         return
+
+    # Log lines contain em dashes and other non-ASCII punctuation, and a Windows console
+    # defaults to a codepage that renders them as mojibake. Render's containers are UTF-8
+    # already; this makes the developer's terminal match.
+    if hasattr(sys.stderr, "reconfigure"):
+        with contextlib.suppress(Exception):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
     handler = logging.StreamHandler(stream=sys.stderr)
     handler.setFormatter(

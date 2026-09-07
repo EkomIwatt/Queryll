@@ -17,6 +17,7 @@ import itertools
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -231,3 +232,58 @@ def test_empty_document_yields_no_chunks() -> None:
     document = extract_plain_text(b"Text.")
     empty = type(document)(text="", blocks=(), pages=(), page_count=None)
     assert chunk_document(empty, SETTINGS) == []
+
+
+def test_a_chunk_of_preamble_takes_the_first_heading_it_contains() -> None:
+    """A chunk that opens before any heading should still say which section it is in.
+
+    The title block of a paper has no heading above it, so the chunk covering it would
+    otherwise carry no path at all — even though most of its text sits under the first
+    section.
+    """
+    source = (
+        "A document title with no markup above it.\n\n"
+        "# 1. Introduction\n\n"
+        "The opening section explains what the document is about.\n"
+    )
+    document = extract_markdown(source.encode("utf-8"))
+    chunks = chunk_document(document, SETTINGS)
+    assert chunks[0].text.startswith("A document title")
+    assert chunks[0].heading_path == "1. Introduction"
+
+
+def test_a_chunk_entirely_before_any_heading_has_no_path() -> None:
+    document = extract_markdown(b"Just a paragraph, and no headings anywhere.\n")
+    chunks = chunk_document(document, SETTINGS)
+    assert chunks[0].heading_path is None
+
+
+def test_chunking_a_large_document_stays_linear() -> None:
+    """A guard against accidentally quadratic chunking.
+
+    Contract 5 §1 allows documents up to 20 MB, and the limits are chosen so that a
+    worst-case document finishes inside the fifteen-minute reclaim window. An innocuous
+    `text[:offset]` inside the sentence splitter once made this two megabytes take minutes
+    rather than a second — the kind of regression that never shows up on a fixture.
+
+    The bound is deliberately loose: it is here to catch a change of complexity class, not to
+    measure the machine.
+    """
+    paragraph = (
+        "Retrieval quality is decided long before the model is called. The passage behind "
+        "each claim has to be found, and it has to be the passage the claim was drawn "
+        "from. Paragraph {n} exists only to give this document some size.\n\n"
+    )
+    body = "".join(paragraph.format(n=index) for index in range(6000)).encode("utf-8")
+    assert len(body) > 1_200_000
+
+    document = extract_plain_text(body)
+    started = time.monotonic()
+    chunks = chunk_document(document, SETTINGS)
+    elapsed = time.monotonic() - started
+
+    assert len(chunks) > 500
+    assert elapsed < 20.0, f"chunking {len(body)} bytes took {elapsed:.1f}s"
+    # Still correct, not just fast.
+    for chunk in chunks:
+        assert document.text[chunk.char_start : chunk.char_end] == chunk.text
