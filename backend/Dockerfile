@@ -29,4 +29,8 @@ EXPOSE 8000
 # process (that is what lets a dropped reader still get a persisted message), so
 # workers do not share it — scale with more instances, not more workers per instance,
 # and never put a buffering proxy in front of /ask.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --no-access-log"]
+#
+# Access logs stay ON. Contract 9 forbids logging file bytes, extracted text, keys and
+# tokens, and none of those appear in a request line — questions travel in POST bodies,
+# and document and chunk ids in a URL are explicitly fine to log.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

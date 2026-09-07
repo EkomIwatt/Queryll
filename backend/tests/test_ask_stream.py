@@ -471,6 +471,175 @@ class TestFailurePaths:
         assert response.status_code == 401
 
 
+class SlowAnswerClient(ScriptedAnswerClient):
+    """A model that pauses between deltas, which is what a real one does."""
+
+    def __init__(self, chunks, delay):
+        super().__init__(chunks)
+        self.delay = delay
+
+    async def stream_answer(self, *, system_blocks, messages):
+        self.calls.append({"system_blocks": list(system_blocks), "messages": list(messages)})
+        for chunk in self.chunks:
+            await asyncio.sleep(self.delay)
+            yield chunk
+
+
+class TestHeartbeat:
+    async def test_a_comment_heartbeat_is_sent_while_the_model_is_thinking(
+        self, client, db, app
+    ):
+        """Contract 7 §2.
+
+        Without this an idle proxy decides the connection is dead and closes it, and the
+        answer dies somewhere between Render and the browser. Every other test in this
+        file uses an instant scripted client, so none of them ever waits long enough for
+        a heartbeat to fire -- which is exactly why this one exists.
+        """
+        from app.config import get_settings
+
+        settings = get_settings()
+        original = settings.sse_heartbeat_seconds
+        settings.sse_heartbeat_seconds = 0.05
+        try:
+            user = await make_user(db)
+            await seed_answerable(db, user)
+            conversation = await make_conversation(db, user)
+            app.state.answer_client = SlowAnswerClient(["slow ", "answer"], delay=0.18)
+
+            async with client.stream(
+                "POST",
+                "/api/conversations/" + str(conversation.id) + "/ask",
+                headers=auth_headers(user),
+                json={"question": MATCHING_TEXT},
+            ) as response:
+                body = "".join([chunk async for chunk in response.aiter_text()])
+        finally:
+            settings.sse_heartbeat_seconds = original
+
+        assert ": ping\n\n" in body
+
+        # A heartbeat is a comment, so it must not disturb the event sequence a client
+        # parses out of the same stream.
+        assert [name for name, _ in parse_sse(body)] == [
+            "retrieval",
+            "token",
+            "token",
+            "done",
+        ]
+
+
+SECOND_MATCHING_TEXT = "The response rate was sixty-one percent across every region."
+
+
+async def seed_two_answerable(db, user):
+    """Two passages, so a second question can clear the floor on its own merits.
+
+    The fake embedder is a hash, so only near-identical text retrieves. A follow-up
+    phrased as ordinary conversation ("and how was it stratified?") correctly takes the
+    insufficient_context path and never reaches the model -- which is right, and which is
+    why these history tests each need a passage of their own to match.
+    """
+    document = await make_document(db, user, filename="survey.pdf")
+    await make_chunks(
+        db,
+        document,
+        [MATCHING_TEXT, SECOND_MATCHING_TEXT],
+        pages=[4, 5],
+        heading_path="3. Methods",
+    )
+    return document
+
+
+class TestConversationHistory:
+    async def test_a_second_question_carries_the_first_turn_to_the_model(
+        self, client, db, app
+    ):
+        user = await make_user(db)
+        await seed_two_answerable(db, user)
+        conversation = await make_conversation(db, user)
+        scripted = ScriptedAnswerClient(["National in scope [1]."])
+        app.state.answer_client = scripted
+
+        await ask(client, user, conversation, MATCHING_TEXT)
+        await ask(client, user, conversation, SECOND_MATCHING_TEXT)
+
+        second_call = scripted.calls[-1]["messages"]
+        contents = [m["content"] for m in second_call]
+        assert MATCHING_TEXT in contents
+        assert contents[-1] == SECOND_MATCHING_TEXT
+        assert second_call[-1]["role"] == "user"
+
+    async def test_stale_markers_do_not_travel_with_the_history(
+        self, client, db, app
+    ):
+        # A [1] from the previous turn points at that turn's source list, not this one.
+        user = await make_user(db)
+        await seed_two_answerable(db, user)
+        conversation = await make_conversation(db, user)
+        scripted = ScriptedAnswerClient(["National in scope [1]."])
+        app.state.answer_client = scripted
+
+        await ask(client, user, conversation, MATCHING_TEXT)
+        await ask(client, user, conversation, SECOND_MATCHING_TEXT)
+
+        history = scripted.calls[-1]["messages"][:-1]
+        assert any("National in scope" in m["content"] for m in history)
+        assert all("[1]" not in m["content"] for m in history)
+
+    async def test_history_is_capped_at_the_configured_number_of_messages(
+        self, client, db, app
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        from app.config import get_settings
+
+        user = await make_user(db)
+        await seed_two_answerable(db, user)
+        conversation = await make_conversation(db, user)
+
+        base = datetime.now(timezone.utc) - timedelta(hours=1)
+        for index in range(12):
+            db.add(
+                Message(
+                    id=uuid.uuid4(),
+                    conversation_id=conversation.id,
+                    role="user" if index % 2 == 0 else "assistant",
+                    content="old turn " + str(index),
+                    citations=[],
+                    created_at=base + timedelta(minutes=index),
+                )
+            )
+        await db.commit()
+
+        scripted = ScriptedAnswerClient(["answer"])
+        app.state.answer_client = scripted
+        await ask(client, user, conversation, SECOND_MATCHING_TEXT)
+
+        sent = scripted.calls[-1]["messages"]
+        cap = get_settings().history_max_messages
+        assert len(sent) <= cap + 1  # capped history, plus the new question
+
+        contents = " ".join(m["content"] for m in sent)
+        assert "old turn 11" in contents  # the most recent turns survive
+        assert "old turn 0" not in contents  # the oldest are dropped
+
+    async def test_prior_turns_sources_are_not_resent(self, client, db, app):
+        # Contract 7 §6: each question retrieves fresh. Only THIS turn's sources are in
+        # the system prompt, so an old passage cannot be cited by a new answer.
+        user = await make_user(db)
+        await seed_answerable(db, user)
+        conversation = await make_conversation(db, user)
+        scripted = ScriptedAnswerClient(["National in scope [1]."])
+        app.state.answer_client = scripted
+
+        await ask(client, user, conversation, MATCHING_TEXT)
+        await ask(client, user, conversation, MATCHING_TEXT)
+
+        sources_block = scripted.calls[-1]["system_blocks"][1]["text"]
+        assert sources_block.count("<source ") == 1
+
+
 class TestScopedAsk:
     async def test_scoping_to_a_document_restricts_the_sources(self, client, db):
         user = await make_user(db)

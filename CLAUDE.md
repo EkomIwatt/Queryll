@@ -829,7 +829,7 @@ Follow the `swarm-worker` runtime protocol for all shared-file, escalation, and 
 
 **Work log:**
 
-**2026-09-07 — Instance 2 — DONE.** `backend/` complete on branch `instance/api`. 180 tests green
+**2026-09-07 — Instance 2 — DONE.** `backend/` complete on branch `instance/api`. 194 tests green
 against real Postgres 16 + pgvector. No test calls the live Voyage or Anthropic API; both keys are
 actively unset in `conftest.py` so a stray real call fails loudly rather than quietly spending quota.
 
@@ -894,6 +894,22 @@ Pydantic v2 both evaluate annotations at runtime, so `Optional[...]` is used uni
 *One producer-side normalization worth naming.* Models emit `[1, 2]` despite instruction; the marker
 filter rewrites it to `[1][2]`. Output stays exactly contract-shaped — only single `[n]` markers ever
 reach the client — but it is a transformation Instance 3 did not ask for and should know about.
+
+*Second pass, same day — three contract requirements I had implemented but never exercised.* Found by
+auditing my own coverage rather than by a failure, and all three are things a merge actually hits.
+(a) **The SSE heartbeat (Contract 7 §2) was untested** — every stream test used an instant scripted
+client, so `: ping` never had time to fire. Now tested with a deliberately slow model and a shortened
+interval, asserting the comment appears AND that it does not disturb the event sequence a client parses
+out of the same stream. (b) **Multi-turn history was only unit-tested.** `build_messages` was covered
+but `load_history` was not, and nothing asserted a second question actually carries the first turn to
+the model, that the 6-message cap holds, that stale `[n]` markers are stripped from history, or that
+prior turns' sources are not re-sent. All four now tested end to end. (c) **CORS was configured and
+never asserted** — the classic silent merge-breaker, since it is browser-enforced and a mistake passes
+every server-side test then fails Instance 3 with an opaque console error and a working `curl`. Now
+covers preflight approval, `allow-credentials: true` (without which the refresh cookie never travels),
+`Authorization` on the allow-list, the origin being echoed rather than wildcarded, and a non-allowed
+origin getting nothing. Also added: the production cookie shape (Secure + SameSite=None) asserted by
+flipping config, since the suite otherwise runs with the local development settings.
 
 *ASSUMED and remaining limits* are listed in full at the end of `backend/README.md`. The load-bearing
 ones: `top_k=8` / floor `0.35` / per-doc cap `4` / history `6` are all tunable config, not constants;
