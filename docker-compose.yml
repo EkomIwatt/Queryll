@@ -1,0 +1,44 @@
+# Queryll — development & test database
+#
+# FROZEN ARTIFACT, committed to `main` at ratification alongside db/init.sql (Contract 2).
+# Owned by NO instance. All three instances need a database to develop and test against, and
+# none of them may own this file — do not edit it, do not add your service here.
+#
+# The `api` and `worker` services are added at MERGE TIME by the human/Reconciler, once both
+# real Dockerfiles exist. Until then this file starts exactly one thing: Postgres with pgvector.
+#
+#   docker compose up -d db          # start it (host port 5433, NOT 5432)
+#   docker compose down -v           # stop it and wipe the volume (re-runs init.sql on next up)
+#
+# HOST PORT IS 5433. Snipp (project 1) already holds 5432 on this machine, so Queryll is mapped
+# one port up and both can run side by side. Instances 1 and 2 must use, in .env.example:
+#
+#   DATABASE_URL=postgresql+asyncpg://queryll:queryll@localhost:5433/queryll
+#
+# Note: db/init.sql runs ONLY when the data volume is empty. After a schema amendment is
+# ratified, `docker compose down -v` is what actually applies it.
+#
+# There is no SQLite fallback in this project — SQLite cannot represent a `vector` column, so
+# every test that touches SQL runs against this container.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: queryll-db
+    environment:
+      POSTGRES_USER: queryll
+      POSTGRES_PASSWORD: queryll
+      POSTGRES_DB: queryll
+    ports:
+      - "5433:5432"
+    volumes:
+      - queryll-pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U queryll -d queryll"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  queryll-pgdata:
