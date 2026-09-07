@@ -1,0 +1,5 @@
+# The PDF and Markdown fixtures are compared byte for byte by the determinism tests, and a
+# PDF is a binary file with byte offsets in its xref table: line-ending conversion silently
+# corrupts it. Git must never touch these.
+*.pdf binary
+*.md -text
