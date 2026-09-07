@@ -628,6 +628,53 @@ does not error, and it does not hide the citation — a historical answer keeps 
 
 (empty at start)
 
+### AMENDMENT 2026-09-07 — Instance 1
+**Type:** proposed-amendment
+**Re:** Contract 3 §4 (legal `documents.status` transitions)
+
+**Issue:** The state diagram gives `processing` exactly two exits — `ready` and `failed` — and
+shows `pending` being re-entered only by Instance 2's re-index. It does not say what
+`documents.status` should be when a job fails *transiently* and is put back on the queue with
+`attempts < 3` (Contract 3 §6). That path is real and routine: a Voyage 503 that survives the
+backoff schedule costs the job one attempt and the job returns to `queued`, but no worker is
+holding the document any more.
+
+Two readings, and the contract supports each in a different place:
+
+* **`processing` stays.** §4's diagram looks exhaustive, and the document is conceptually still
+  mid-ingestion.
+* **Back to `pending`.** §7 says progress "resets to 0.0 only on a transition back to
+  `pending`", which implies transitions back to `pending` exist beyond re-index — and a retry is
+  precisely where progress must reset, because the next run starts from zero.
+
+I implemented the second reading (`processing -> pending`, progress 0.0, job `queued`), on the
+grounds that `pending` means "waiting for a worker", which is exactly true after a requeue, and
+that §7 anticipates it. **This is not user-visible**: Contract 6 §4 has Instance 3 polling on
+both `pending` and `processing`, and both render as in-progress. It *is* visible to any
+stuck-job admin view Instance 2 builds, which is why it is worth pinning down rather than
+leaving to two independent guesses.
+
+**Proposed resolution:** add the retry edge to the §4 diagram, making the implemented behaviour
+explicit:
+
+```
+pending ──(worker claims)──> processing ──(all chunks written)──> ready
+                                  │
+                                  ├──(unrecoverable, or attempts >= 3)──> failed
+                                  └──(transient failure, attempts < 3)──> pending
+ready ─────(re-index, Instance 2)──> pending
+failed ────(re-index, Instance 2)──> pending
+```
+
+If the human prefers the first reading instead, the change on this side is one line in
+`worker/queryll_worker/queue.py::requeue_job` (`reset_document=False`), plus the two tests that
+assert it.
+
+**Blocked work:** none — implemented under the second reading, tested, and documented in the
+Instance 1 work log. Raised so the merge does not discover two instances assuming different
+state machines.
+**Status:** OPEN
+
 ---
 
 ## INSTANCE 1 — Ingestion Worker & the Vector Pipeline  ·  STATUS: DONE
@@ -756,6 +803,14 @@ message saying to escalate. **No test calls the live Voyage API.**
    type**, double-converting every vector so no chunk insert could succeed. One conversion, in
    one place.
 
+*A fifth defect, found while reviewing contract surfaces before merge.* `chunk_count` was
+only ever written on success, so a document whose **re-index failed** kept advertising the
+passage count of an index that no longer existed — Instance 2's re-index transaction deletes
+the chunks but writes only `status`, `progress` and `error_message` (Contract 3 §1). It is
+now cleared when a run begins. `page_count` deliberately survives: it describes the file, not
+the index. Contract 6 §1's `error_message` non-null *iff* `failed` invariant is now asserted
+across both terminal paths.
+
 *Two quality judgements Instance 3 will see in the UI.* A document's **title is demoted to
 content** when the evidence is unambiguous, so citations read `3. Methods > 3.2 Sampling` rather
 than `<Whole Paper Title> > 3. Methods > 3.2 Sampling`. And a chunk that opens before any
@@ -803,7 +858,11 @@ parameterised.
   values, unchanged; `tools/quality_harness.py --target-tokens/--overlap-tokens` is how to tune
   them against real documents.
 
-**No escalations raised.** Every frozen contract was implementable exactly as written.
+**One amendment raised** (Contract 3 §4, above): the state machine does not say what
+`documents.status` becomes when a job is requeued after a *transient* failure with
+`attempts < 3`. I implemented `processing -> pending` and explained why there; it is not
+user-visible, but two instances guessing differently would be. Everything else in the
+frozen contracts was implementable exactly as written.
 
 ---
 

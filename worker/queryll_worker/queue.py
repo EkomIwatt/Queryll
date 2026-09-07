@@ -107,11 +107,18 @@ async def load_document(
 
 
 async def begin_processing(session: AsyncSession, document_id: uuid.UUID) -> None:
-    """`pending -> processing`. Progress restarts at 0 and any old error is cleared.
+    """`pending -> processing`. Progress restarts at 0 and the last run's results are cleared.
 
     Contract 3 §7: parsing and chunking happen before any chunk count is known, so a run
     genuinely sits at 0.0 for a moment — Instance 3 renders that as an indeterminate state
     rather than a stalled bar.
+
+    `chunk_count` and `indexed_at` are cleared here, not just on success, because of the
+    re-index path. Instance 2's re-index transaction deletes the document's chunks but does not
+    touch these two columns (Contract 3 §1 lists exactly what it writes), so a document that was
+    `ready` with forty chunks would otherwise keep reporting forty while it has none — and would
+    keep reporting them if this run went on to fail. `page_count` is deliberately left alone: it
+    describes the file, not the index, and the bytes have not changed.
     """
     await session.execute(
         update(Document)
@@ -120,6 +127,7 @@ async def begin_processing(session: AsyncSession, document_id: uuid.UUID) -> Non
             status=DocumentStatus.PROCESSING,
             progress=0.0,
             error_message=None,
+            chunk_count=None,
             indexed_at=None,
         )
     )

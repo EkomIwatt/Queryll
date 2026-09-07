@@ -394,3 +394,74 @@ def test_batch_size_never_exceeds_the_contract_ceiling(
     total: int, configured: int, expected: int
 ) -> None:
     assert batch_size_for(total, configured) == expected
+
+
+async def test_a_failed_reindex_does_not_keep_reporting_the_old_chunk_count(
+    session_factory, enqueue, settings: Settings
+) -> None:  # type: ignore[no-untyped-def]
+    """Re-index the "40 passages" problem out of existence.
+
+    Instance 2's re-index transaction deletes the document's chunks but writes only `status`,
+    `progress` and `error_message` (Contract 3 §1). If this worker did not clear `chunk_count`
+    at the start of a run, a document whose re-index then failed would sit in the library as
+    "failed" while still advertising the passage count of an index that no longer exists.
+    """
+    document_id, _ = await enqueue(
+        fixture_bytes("scanned_no_text.pdf"),
+        filename="scan.pdf",
+        mime_type="application/pdf",
+    )
+    # Stand in for the state Instance 2's re-index leaves behind on a previously-ready document.
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                "UPDATE documents SET chunk_count = 40, page_count = 9, "
+                "indexed_at = now() WHERE id = :id"
+            ),
+            {"id": document_id},
+        )
+        await session.commit()
+
+    job = await _claim(session_factory)
+    outcome = await run_job(
+        job, session_factory=session_factory, settings=settings, embedder=FakeEmbedder()
+    )
+
+    assert outcome.status == "failed"
+    row = await _document(session_factory, document_id)
+    assert row["status"] == "failed"
+    assert row["chunk_count"] is None
+    assert await _chunks(session_factory, document_id) == []
+    # `page_count` describes the file, not the index, so it survives.
+    assert row["page_count"] == 9
+
+
+async def test_error_message_is_non_null_exactly_when_the_document_failed(
+    session_factory, enqueue, settings: Settings
+) -> None:  # type: ignore[no-untyped-def]
+    """Contract 6 §1: `error_message` is non-null *iff* `status == "failed"`.
+
+    Checked across both terminal paths in one test, because Instance 3 keys its failure UI off
+    exactly this and a stale message under a `ready` document would render as a broken success.
+    """
+    good, _ = await enqueue(MARKDOWN, filename="notes.md", mime_type="text/markdown")
+    bad, _ = await enqueue(
+        fixture_bytes("scanned_no_text.pdf"),
+        filename="scan.pdf",
+        mime_type="application/pdf",
+    )
+
+    for _ in range(2):
+        job = await _claim(session_factory)
+        assert job is not None
+        await run_job(
+            job,
+            session_factory=session_factory,
+            settings=settings,
+            embedder=FakeEmbedder(),
+        )
+
+    for document_id in (good, bad):
+        row = await _document(session_factory, document_id)
+        failed = row["status"] == "failed"
+        assert bool(row["error_message"]) is failed, row
