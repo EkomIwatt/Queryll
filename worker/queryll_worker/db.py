@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import event, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -21,26 +21,21 @@ from sqlalchemy.ext.asyncio import (
 
 
 def create_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
-    """Build the asyncpg engine and teach asyncpg about pgvector's `vector` type.
+    """Build the asyncpg engine.
 
-    Without the codec registration below, asyncpg cannot encode a Python list into a
-    `vector` bind parameter and every chunk insert fails at the driver.
+    Note what is deliberately *not* here: `pgvector.asyncpg.register_vector`. The SQLAlchemy
+    `Vector` type already renders a vector to its text form on the way out and parses it on
+    the way back, so installing the driver-level codec as well makes asyncpg receive a string
+    where it expects a sequence of floats, and every chunk insert fails at the driver. One
+    conversion, in one place.
     """
-    engine = create_async_engine(
+    return create_async_engine(
         database_url,
         echo=echo,
         pool_size=5,
         max_overflow=2,
         pool_pre_ping=True,
     )
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _register_vector(dbapi_connection, _record) -> None:  # type: ignore[no-untyped-def]
-        from pgvector.asyncpg import register_vector
-
-        dbapi_connection.await_(register_vector(dbapi_connection.driver_connection))
-
-    return engine
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

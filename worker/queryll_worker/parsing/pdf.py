@@ -16,18 +16,20 @@ from __future__ import annotations
 import io
 import logging
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
 
 from queryll_worker.errors import PermanentIngestError
 from queryll_worker.logging_setup import kv
 from queryll_worker.parsing.base import Block, BlockKind, ExtractedDocument, PageSpan
 from queryll_worker.parsing.pdf_layout import (
-    HeadingModel,
     Line,
+    Row,
     build_heading_model,
-    find_running_lines,
-    page_lines,
+    find_running_rows,
+    order_rows,
+    page_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,8 +92,13 @@ def _open_pdf(content: bytes) -> Any:
         ) from exc
 
 
-def _collect_lines(pdf: Any, *, max_pages: int) -> tuple[list[Line], int, bool]:
-    """Read every page into ordered lines. Returns (lines, page_count, saw_images)."""
+def _collect_rows(pdf: Any, *, max_pages: int) -> tuple[list[Row], int, bool]:
+    """Read every page into rows. Returns (rows, page_count, saw_images).
+
+    Rows, not lines: running headers have to be found and removed before columns are worked
+    out, because a centred running title crosses the gutter and changes what the page looks
+    like to the column detector.
+    """
     page_count = len(pdf.pages)
     if page_count == 0:
         raise PermanentIngestError(
@@ -103,7 +110,7 @@ def _collect_lines(pdf: Any, *, max_pages: int) -> tuple[list[Line], int, bool]:
             f"{max_pages} pages."
         )
 
-    lines: list[Line] = []
+    rows: list[Row] = []
     saw_images = False
     for index, page in enumerate(pdf.pages, start=1):
         try:
@@ -114,22 +121,24 @@ def _collect_lines(pdf: Any, *, max_pages: int) -> tuple[list[Line], int, bool]:
             )
             saw_images = saw_images or bool(page.images)
         except Exception as exc:  # a single corrupt page should not lose the document
-            logger.warning("page extraction failed %s", kv(page=index, kind=type(exc).__name__))
+            logger.warning(
+                "page extraction failed %s", kv(page=index, kind=type(exc).__name__)
+            )
             continue
         finally:
             page.flush_cache()
 
         if not words:
             continue
-        lines.extend(
-            page_lines(
+        rows.extend(
+            page_rows(
                 words,
                 page=index,
                 page_width=float(page.width),
                 page_height=float(page.height),
             )
         )
-    return lines, page_count, saw_images
+    return rows, page_count, saw_images
 
 
 def _column_metrics(lines: Sequence[Line]) -> dict[tuple[int, int], _ColumnMetrics]:
@@ -137,6 +146,8 @@ def _column_metrics(lines: Sequence[Line]) -> dict[tuple[int, int], _ColumnMetri
     grouped: dict[tuple[int, int], list[Line]] = {}
     for line in lines:
         grouped.setdefault((line.page, line.column), []).append(line)
+    # A full-width title sits in its own bucket (FULL_WIDTH_COLUMN), so it cannot stretch the
+    # measure of the column beneath it and make every body line look like it ended short.
     return {
         key: _ColumnMetrics(
             left=min(line.x0 for line in group),
@@ -261,11 +272,11 @@ def extract_pdf(content: bytes, *, max_pages: int) -> ExtractedDocument:
 
     pdf = _open_pdf(content)
     try:
-        lines, page_count, saw_images = _collect_lines(pdf, max_pages=max_pages)
+        rows, page_count, saw_images = _collect_rows(pdf, max_pages=max_pages)
     finally:
         pdf.close()
 
-    total_chars = sum(len(line.text.strip()) for line in lines)
+    total_chars = sum(len(row.text.strip()) for row in rows)
     if total_chars < _MIN_MEANINGFUL_CHARS:
         if saw_images:
             raise PermanentIngestError(
@@ -278,13 +289,19 @@ def extract_pdf(content: bytes, *, max_pages: int) -> ExtractedDocument:
             detail="no extractable text",
         )
 
-    running = find_running_lines(lines, page_count)
+    running = find_running_rows(rows, page_count)
     if running:
         logger.info(
             "stripped running headers/footers %s",
             kv(lines=len(running), pages=page_count),
         )
-    body = [line for index, line in enumerate(lines) if index not in running]
+    kept = [row for index, row in enumerate(rows) if index not in running]
+
+    # Columns are worked out per page, after the boilerplate is gone.
+    body: list[Line] = []
+    for page_number in sorted({row.page for row in kept}):
+        body.extend(order_rows([row for row in kept if row.page == page_number]))
+
     if not body:
         raise PermanentIngestError(
             "This PDF contains no readable text, so there was nothing to index.",
@@ -325,7 +342,7 @@ def extract_pdf(content: bytes, *, max_pages: int) -> ExtractedDocument:
             groups[-1].append(current)
 
     builder = _Builder(parts=[], offset=0, page_marks=[], blocks=[])
-    for group, level in zip(groups, group_levels):
+    for group, level in zip(groups, group_levels, strict=False):
         builder.add_group(group, level)
 
     text = "".join(builder.parts)

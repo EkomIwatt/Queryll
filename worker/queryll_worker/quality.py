@@ -27,8 +27,8 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Sequence
 
 from queryll_worker.chunking import ChunkCandidate
 

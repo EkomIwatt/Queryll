@@ -14,6 +14,7 @@ import contextlib
 import logging
 import signal
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from queryll_worker import queue
@@ -92,8 +93,18 @@ def install_signal_handlers(shutdown: ShutdownSignal) -> None:
             signal.signal(signal_number, _handle)
 
 
-async def run_forever(settings: Settings, shutdown: ShutdownSignal | None = None) -> int:
-    """Claim and process jobs until asked to stop. Returns the process exit code."""
+async def run_forever(
+    settings: Settings,
+    shutdown: ShutdownSignal | None = None,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> int:
+    """Claim and process jobs until asked to stop. Returns the process exit code.
+
+    `sleep` is injectable so a test can watch the idle path without reaching into the
+    `asyncio` module itself — patching `asyncio.sleep` globally would change how every other
+    coroutine in the process behaves, including the database driver's.
+    """
     shutdown = shutdown or ShutdownSignal()
     validate_runtime(settings)
 
@@ -124,7 +135,7 @@ async def run_forever(settings: Settings, shutdown: ShutdownSignal | None = None
                 if now - last_idle_log >= settings.idle_log_interval_seconds:
                     logger.info("queue empty %s", kv(worker=settings.worker_id))
                     last_idle_log = now
-                await asyncio.sleep(settings.poll_interval_seconds)
+                await sleep(settings.poll_interval_seconds)
                 continue
 
             last_idle_log = 0.0

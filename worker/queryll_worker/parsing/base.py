@@ -77,7 +77,9 @@ def page_at(pages: tuple[PageSpan, ...], offset: int) -> int | None:
     return pages[idx].number
 
 
-def page_range(pages: tuple[PageSpan, ...], start: int, end: int) -> tuple[int | None, int | None]:
+def page_range(
+    pages: tuple[PageSpan, ...], start: int, end: int
+) -> tuple[int | None, int | None]:
     """The inclusive 1-based page range a `[start, end)` span covers (Contract 5 §5).
 
     A chunk that straddles a page break carries both numbers; a chunk inside one page carries

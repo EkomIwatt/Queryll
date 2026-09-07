@@ -306,10 +306,11 @@ async def test_committing_chunks_for_a_deleted_document_writes_nothing(
 
 async def test_a_mismatched_vector_count_is_refused(session_factory, enqueue) -> None:  # type: ignore[no-untyped-def]
     document_id, job_id = await enqueue(b"body")
-    async with session_factory() as session, pytest.raises(ValueError):
-        await queue.commit_chunks(
-            session, job_id, document_id, [_candidate(0, "x")], [], 1
-        )
+    async with session_factory() as session:
+        with pytest.raises(ValueError):
+            await queue.commit_chunks(
+                session, job_id, document_id, [_candidate(0, "x")], [], 1
+            )
 
 
 async def test_deleting_a_document_cascades(session_factory, enqueue) -> None:  # type: ignore[no-untyped-def]

@@ -9,8 +9,8 @@ runs twice leaves exactly the database a job that ran once would (Contract 3 §5
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import replace
-from typing import Sequence
 
 import pytest
 from sqlalchemy import text
@@ -377,11 +377,11 @@ async def test_a_document_deleted_before_ingestion_is_not_resurrected(
     assert await _chunks(session_factory, document_id) == []
 
 
-# --- pure helpers ------------------------------------------------------------------------------
+# --- pure helpers ---------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "total,configured,expected",
+    ("total", "configured", "expected"),
     [
         (0, 128, 128),
         (10, 128, 16),

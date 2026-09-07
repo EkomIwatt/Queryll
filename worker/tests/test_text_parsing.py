@@ -72,7 +72,9 @@ def test_front_matter_is_not_covered_by_any_block() -> None:
     """Metadata is not prose; nothing should ever cite it."""
     document = extract_markdown(MARKDOWN.encode("utf-8"))
     first = min(block.char_start for block in document.blocks)
-    assert "title: Notes" not in document.text[:first] or first > MARKDOWN.index("# Ingestion")
+    # The front matter is still in the canonical text — offsets must stay reproducible from
+    # the raw file — but the first block starts after it, so no chunk can reach it.
+    assert first >= MARKDOWN.index("# Ingestion notes")
     assert all(
         "title: Notes" not in document.slice(block) for block in document.blocks
     )

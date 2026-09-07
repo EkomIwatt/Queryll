@@ -130,6 +130,11 @@ def _render(items: list[Item], path: Path) -> None:
         if item.kind == "heading":
             y -= 6.0
         for line in lines:
+            width = pdfmetrics.stringWidth(line, font, size)
+            assert width <= COLUMN_WIDTH, (
+                f"{item.kind} line overflows the column by "
+                f"{width - COLUMN_WIDTH:.1f}pt: {line!r}"
+            )
             if y < BODY_BOTTOM:
                 new_column()
             pdf.setFont(font, size)
@@ -176,12 +181,15 @@ ITEMS: list[Item] = [
         "multi-sentence explanations; larger chunks diluted the query signal with unrelated "
         "material from adjacent sections.",
     ),
+    # Hand-broken so a word is hyphenated across a line break, which the extractor has to
+    # rejoin. Every line must fit inside COLUMN_WIDTH — `_render` asserts it, because a line
+    # that overflows its column crosses the gutter and stops being a two-column page at all.
     Item(
         "prewrapped",
         "Splitting on document structure rather than on a fixed\n"
-        "character count produced chunks with markedly better reproduci-\n"
-        "bility across re-indexing runs, which matters because chunk\n"
-        "identifiers are regenerated whenever a document is re-indexed.",
+        "character count produced chunks with better reproduci-\n"
+        "bility across re-indexing runs, which matters because\n"
+        "the chunk identifiers are regenerated on every run.",
     ),
     Item("heading", "2.2 Embeddings", level=2),
     Item(
@@ -249,6 +257,59 @@ ITEMS: list[Item] = [
     ),
 ]
 
+
+def _filler() -> list[Item]:
+    """Deterministic body text, so the fixture is four pages rather than one.
+
+    A one-page PDF cannot exercise a running header that starts on page two, page-number
+    footers, or a paragraph that carries across a page break — which are three of the four
+    things this fixture exists for. The prose is generated rather than written because its
+    content is irrelevant; only its bulk and its shape matter.
+    """
+    subjects = (
+        "the retrieval layer", "the annotation protocol", "the evaluation harness",
+        "the ranking model", "the chunking pass", "the citation viewer",
+        "the ingestion worker", "the embedding cache",
+    )
+    verbs = (
+        "was measured against", "was compared with", "was tuned alongside",
+        "was validated using", "was contrasted with", "was calibrated against",
+    )
+    objects = (
+        "a held-out set of two hundred questions",
+        "the annotations produced in the second round",
+        "a baseline that retrieved whole documents",
+        "the configuration reported in the previous section",
+        "an ablation with overlap removed entirely",
+        "a lexical retriever using BM25 scoring",
+    )
+    tails = (
+        "The difference was small but consistent across product areas.",
+        "We report the mean over five runs; the variance was negligible.",
+        "The effect did not survive correction for document length.",
+        "Annotators preferred the shorter passages in every product area.",
+        "No configuration recovered an answer that chunking had split in half.",
+    )
+
+    items: list[Item] = [Item("heading", "6. Extended results", level=1)]
+    index = 0
+    for section in range(1, 5):
+        items.append(Item("heading", f"6.{section} Additional comparisons", level=2))
+        for _ in range(6):
+            sentences = []
+            for _ in range(4):
+                sentences.append(
+                    f"{subjects[index % len(subjects)].capitalize()} "
+                    f"{verbs[index % len(verbs)]} {objects[index % len(objects)]}. "
+                    f"{tails[index % len(tails)]}"
+                )
+                index += 1
+            items.append(Item("body", " ".join(sentences)))
+    return items
+
+
+ITEMS.extend(_filler())
+
 SIMPLE_MARKDOWN = """---
 title: Ingestion notes
 ---
@@ -297,15 +358,33 @@ def _write_encrypted(path: Path) -> None:
 
 
 def _write_scanned(path: Path) -> None:
-    """An image-only PDF: what a scan looks like to a parser that does not do OCR."""
+    """An image-only PDF: what a scan actually looks like to a parser that does not do OCR.
+
+    A raster image, not vector rectangles. The distinction matters: the extractor tells "this
+    is a scan, and Queryll does not read scans" apart from "this file has no text in it" by
+    asking whether the page carried any images, and only a real embedded raster exercises that
+    path the way a scanner's output would.
+    """
+    from PIL import Image, ImageDraw
+    from reportlab.lib.utils import ImageReader
+
+    page = Image.new("L", (850, 1100), color=235)
+    draw = ImageDraw.Draw(page)
+    for index, offset in enumerate(range(80, 900, 26)):
+        # Grey bars standing in for lines of scanned text, ragged like a real scan.
+        draw.rectangle(
+            [90, offset, 90 + 620 - (index % 5) * 55, offset + 11], fill=90
+        )
+    raster = io.BytesIO()
+    page.save(raster, format="PNG")
+    raster.seek(0)
+
     buffer = io.BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=LETTER)
     for _ in range(2):
-        pdf.setFillGray(0.85)
-        pdf.rect(MARGIN, MARGIN, PAGE_WIDTH - 2 * MARGIN, PAGE_HEIGHT - 2 * MARGIN, fill=1)
-        pdf.setFillGray(0.4)
-        for offset in range(0, 400, 24):
-            pdf.rect(MARGIN + 40, PAGE_HEIGHT - MARGIN - 60 - offset, 300, 8, fill=1)
+        pdf.drawImage(
+            ImageReader(raster), 0, 0, width=PAGE_WIDTH, height=PAGE_HEIGHT
+        )
         pdf.showPage()
     pdf.save()
     path.write_bytes(buffer.getvalue())

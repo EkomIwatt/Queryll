@@ -16,10 +16,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
 import httpx
 
+from queryll_worker.chunking.tokenizer import count_tokens, truncate_to_tokens
 from queryll_worker.config import (
     INPUT_TYPE_DOCUMENT,
     MAX_INPUTS_PER_REQUEST,
@@ -27,7 +28,6 @@ from queryll_worker.config import (
     OUTPUT_DTYPE,
     VOYAGE_API_URL,
 )
-from queryll_worker.chunking.tokenizer import count_tokens, truncate_to_tokens
 from queryll_worker.embeddings.base import check_batch
 from queryll_worker.errors import PermanentIngestError, TransientIngestError
 from queryll_worker.logging_setup import kv
@@ -95,7 +95,7 @@ class VoyageEmbedder:
             )
 
         payload_inputs = [self._fit(text, index) for index, text in enumerate(texts)]
-        body = {
+        body: dict[str, object] = {
             "input": payload_inputs,
             "model": self._model,
             "input_type": INPUT_TYPE_DOCUMENT,

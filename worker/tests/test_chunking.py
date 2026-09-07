@@ -13,6 +13,7 @@ rather than over one hand-written string:
 
 from __future__ import annotations
 
+import itertools
 import json
 import subprocess
 import sys
@@ -107,7 +108,7 @@ def test_consecutive_chunks_overlap() -> None:
     chunks = chunk_document(document, SETTINGS)
     overlapping = [
         later.char_start < earlier.char_end
-        for earlier, later in zip(chunks, chunks[1:])
+        for earlier, later in itertools.pairwise(chunks)
     ]
     assert any(overlapping), "no chunk overlapped its predecessor"
 
@@ -116,7 +117,7 @@ def test_overlap_never_repeats_a_whole_chunk() -> None:
     """A chunk that is a superset of its predecessor would mean the packer failed to advance."""
     document = extract_plain_text(PROSE.encode("utf-8"))
     chunks = chunk_document(document, SETTINGS)
-    for earlier, later in zip(chunks, chunks[1:]):
+    for earlier, later in itertools.pairwise(chunks):
         assert later.char_start > earlier.char_start
         assert later.char_end > earlier.char_end
 
@@ -141,7 +142,8 @@ def test_headings_start_new_chunks_and_populate_the_heading_path() -> None:
         "Start Postgres with pgvector before running anything else.\n"
     )
     document = extract_markdown(source.encode("utf-8"))
-    chunks = chunk_document(document, ChunkingSettings(min_tokens=0, target_tokens=64))
+    settings = ChunkingSettings(min_tokens=0, target_tokens=64, overlap_tokens=8)
+    chunks = chunk_document(document, settings)
     paths = [chunk.heading_path for chunk in chunks]
     assert "Guide > Setup > Database" in paths
     assert paths[0] == "Guide"

@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error::DeprecationWarning:queryll_worker.*"]
 markers = [
     "postgres: needs the pgvector database from docker-compose (host port 5433)",

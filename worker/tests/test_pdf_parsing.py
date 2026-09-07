@@ -35,7 +35,7 @@ def test_page_spans_are_contiguous_and_cover_the_text(paper) -> None:  # type: i
     """A gap would mean an offset in it resolved to no page at all."""
     assert paper.pages
     assert paper.pages[0].char_start == 0
-    for earlier, later in zip(paper.pages, paper.pages[1:]):
+    for earlier, later in zip(paper.pages, paper.pages[1:], strict=False):
         assert earlier.char_end == later.char_start
         assert earlier.number <= later.number
     assert paper.pages[-1].char_end == len(paper.text)
@@ -47,7 +47,7 @@ def test_blocks_slice_back_to_the_canonical_text(paper) -> None:  # type: ignore
 
 
 def test_blocks_are_ordered_and_do_not_overlap(paper) -> None:  # type: ignore[no-untyped-def]
-    for earlier, later in zip(paper.blocks, paper.blocks[1:]):
+    for earlier, later in zip(paper.blocks, paper.blocks[1:], strict=False):
         assert earlier.char_end <= later.char_start
 
 

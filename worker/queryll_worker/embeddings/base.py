@@ -15,7 +15,8 @@ guarantee that a wrong-shaped vector never reaches the database.
 from __future__ import annotations
 
 import math
-from typing import Protocol, Sequence
+from collections.abc import Sequence
+from typing import Protocol
 
 from queryll_worker.config import NORM_TOLERANCE
 from queryll_worker.errors import EmbeddingContractError

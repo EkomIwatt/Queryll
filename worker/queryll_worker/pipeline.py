@@ -26,6 +26,7 @@ from queryll_worker.db import session_scope
 from queryll_worker.embeddings.base import Embedder
 from queryll_worker.errors import (
     GENERIC_FAILURE_MESSAGE,
+    EmbeddingContractError,
     PermanentIngestError,
     TransientIngestError,
 )
@@ -99,6 +100,12 @@ async def run_job(
         # and idempotent ingestion makes re-running it safe.
         logger.warning("job cancelled mid-run %s", kv(document=str(job.document_id)))
         raise
+    except EmbeddingContractError:
+        # Must come before the catch-all below: a wrong-shaped vector is not a bad document,
+        # and swallowing it here would fail whichever document happened to be next in the
+        # queue while the real fault — two processes disagreeing about what a vector means —
+        # went unreported. The runner halts the worker on this instead.
+        raise
     except Exception as exc:  # an unexpected bug should not poison the queue forever
         logger.exception("unexpected ingestion failure %s", kv(document=str(job.document_id)))
         return await _handle_transient(
@@ -147,7 +154,10 @@ async def _ingest(
         if document is None:
             # Deleted between the claim and now. `ON DELETE CASCADE` took the job row with it,
             # so there is nothing left to update.
-            logger.info("document vanished before ingestion %s", kv(document=str(job.document_id)))
+            logger.info(
+                "document vanished before ingestion %s",
+                kv(document=str(job.document_id)),
+            )
             return JobOutcome(status="vanished")
         await queue.begin_processing(session, job.document_id)
 

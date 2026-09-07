@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import random
-from typing import Sequence
+from collections.abc import Sequence
 
 from queryll_worker.config import DEFAULT_EMBEDDING_DIM
 from queryll_worker.embeddings.base import check_batch, l2_norm

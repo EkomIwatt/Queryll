@@ -26,7 +26,11 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from queryll_worker.config import ChunkingSettings, Settings
 from queryll_worker.db import create_engine, create_session_factory
@@ -76,38 +80,88 @@ def settings() -> Settings:
 
 async def _database_is_available() -> str | None:
     """Prepare `queryll_worker_test` and return None, or a reason to skip."""
-    engine = create_engine(ADMIN_URL)
+    # Bootstrap uses a bare engine, not `queryll_worker.db.create_engine`: that one registers
+    # the pgvector codec on connect, which cannot work until `CREATE EXTENSION vector` has run.
+    engine = create_async_engine(ADMIN_URL)
     try:
+        # AUTOCOMMIT because `CREATE DATABASE` cannot run inside a transaction block.
         async with engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
-            existing = await connection.execute(
+            autocommit = await connection.execution_options(
+                isolation_level="AUTOCOMMIT"
+            )
+            await autocommit.execute(text("SELECT 1"))
+            existing = await autocommit.execute(
                 text("SELECT 1 FROM pg_database WHERE datname = :name"),
                 {"name": TEST_DB_NAME},
             )
             if existing.first() is None:
-                # CREATE DATABASE cannot run inside a transaction block.
-                raw = await connection.get_raw_connection()
-                await raw.driver_connection.execute(
-                    f'CREATE DATABASE "{TEST_DB_NAME}"'
-                )
-    except Exception as exc:  # noqa: BLE001 - any failure means "no database"
-        return f"pgvector database not reachable at {ADMIN_URL.rsplit('@', 1)[-1]}: {exc}"
+                await autocommit.execute(text(f'CREATE DATABASE "{TEST_DB_NAME}"'))
+    except Exception as exc:
+        host = ADMIN_URL.rsplit("@", 1)[-1]
+        return f"pgvector database not reachable at {host}: {exc}"
     finally:
         await engine.dispose()
 
-    engine = create_engine(TEST_URL)
+    engine = create_async_engine(TEST_URL)
     try:
         async with engine.begin() as connection:
             present = await connection.execute(
                 text("SELECT to_regclass('public.chunks')")
             )
-            if present.scalar() is None:
-                await connection.execute(text(INIT_SQL.read_text(encoding="utf-8")))
-    except Exception as exc:  # noqa: BLE001
+            needs_schema = present.scalar() is None
+    except Exception as exc:
+        await engine.dispose()
+        return f"could not reach {TEST_DB_NAME}: {exc}"
+
+    if not needs_schema:
+        await engine.dispose()
+        return None
+
+    statements = _split_sql(INIT_SQL.read_text(encoding="utf-8"))
+    extensions = [s for s in statements if s.upper().startswith("CREATE EXTENSION")]
+    remainder = [s for s in statements if s not in extensions]
+
+    try:
+        # The extensions have to be committed on their own connection first: asyncpg learns
+        # the server's type catalogue when it connects, so a connection that predates
+        # `CREATE EXTENSION vector` cannot parse `vector(1024)` in the very next statement.
+        async with engine.begin() as connection:
+            for statement in extensions:
+                await connection.execute(text(statement))
+        await engine.dispose()
+
+        engine = create_async_engine(TEST_URL)
+        async with engine.begin() as connection:
+            for statement in remainder:
+                await connection.execute(text(statement))
+    except Exception as exc:
         return f"could not apply db/init.sql to {TEST_DB_NAME}: {exc}"
     finally:
         await engine.dispose()
     return None
+
+
+def _split_sql(script: str) -> list[str]:
+    """Split the ratified DDL into single statements.
+
+    asyncpg's extended query protocol takes one statement per call, so the script cannot be
+    handed over whole. `db/init.sql` is plain DDL with no functions or dollar-quoting, so
+    splitting on statement-terminating semicolons is sufficient — and it is Contract 2's file,
+    read here and never written.
+    """
+    statements: list[str] = []
+    buffer: list[str] = []
+    for line in script.splitlines():
+        stripped = line.split("--", 1)[0].rstrip() if "--" in line else line.rstrip()
+        if not stripped.strip():
+            continue
+        buffer.append(stripped)
+        if stripped.endswith(";"):
+            statements.append("\n".join(buffer).rstrip(";").strip())
+            buffer = []
+    if buffer:
+        statements.append("\n".join(buffer).strip())
+    return [statement for statement in statements if statement]
 
 
 @pytest.fixture(scope="session")
@@ -151,8 +205,14 @@ async def user_id(session_factory: async_sessionmaker[AsyncSession]) -> uuid.UUI
 
 
 @pytest.fixture
-def enqueue(session_factory: async_sessionmaker[AsyncSession], user_id: uuid.UUID):  # type: ignore[no-untyped-def]
-    """Insert a document and its job the way Instance 2 does: one transaction (Contract 3 §2)."""
+def enqueue(  # type: ignore[no-untyped-def]
+    session_factory: async_sessionmaker[AsyncSession], user_id: uuid.UUID
+):
+    """Insert a document and its job the way Instance 2 does.
+
+    One transaction for both rows, per Contract 3 §2: a committed document without a job is
+    an unreachable state, so the fixture must not be able to create one either.
+    """
 
     async def _enqueue(
         content: bytes,

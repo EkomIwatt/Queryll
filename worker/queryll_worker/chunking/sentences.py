@@ -27,10 +27,10 @@ _ABBREVIATIONS = frozenset(
 )
 
 #: A candidate boundary: terminal punctuation, optional closers, then whitespace.
-_BOUNDARY_RE = re.compile(r"[.!?…]['\"’”)\]]*(?=\s)")
+_BOUNDARY_RE = re.compile(r"[.!?…]['\"’”)\]]*(?=\s)")  # noqa: RUF001 - curly quotes are real punctuation
 #: The token immediately before the punctuation, used for the abbreviation check.
 _TRAILING_WORD_RE = re.compile(r"([A-Za-z][A-Za-z.]*)$")
-_OPENERS = "\"'‘“([{"
+_OPENERS = "\"'‘“([{"  # noqa: RUF001 - curly quotes are real punctuation
 
 
 def _is_boundary(text: str, punct_index: int, next_index: int) -> bool:

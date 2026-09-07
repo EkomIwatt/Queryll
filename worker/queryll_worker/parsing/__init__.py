@@ -19,11 +19,11 @@ __all__ = [
     "BlockKind",
     "ExtractedDocument",
     "PageSpan",
+    "decode_text",
     "extract",
     "extract_markdown",
     "extract_pdf",
     "extract_plain_text",
-    "decode_text",
     "page_at",
     "page_range",
 ]

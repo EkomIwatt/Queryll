@@ -12,7 +12,8 @@ The `--voyage` run is a **merge-time** tool, not a test — Contract 4 forbids a
 calling the live API. It is the second half of the ★ cross-process probe: if the cosine probe
 passes but this reports junk rankings, the divergence is in `input_type`, not in the model.
 
-    VOYAGE_API_KEY=... python tools/quality_harness.py --voyage --document tests/fixtures/paper_two_column.pdf
+    VOYAGE_API_KEY=... python tools/quality_harness.py --voyage \
+        --document tests/fixtures/paper_two_column.pdf
 """
 
 from __future__ import annotations
@@ -21,8 +22,8 @@ import argparse
 import asyncio
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -113,14 +114,16 @@ async def _voyage_scores(
         response.raise_for_status()
         payload = response.json()
 
-    query_vectors = [item["embedding"] for item in sorted(payload["data"], key=lambda i: i["index"])]
+    ordered = sorted(payload["data"], key=lambda item: item["index"])
+    query_vectors = [item["embedding"] for item in ordered]
     for vector in query_vectors:
         check_vector(vector, dimension)
 
     scores: dict[str, list[float]] = {}
-    for question, query_vector in zip(questions, query_vectors):
+    for question, query_vector in zip(questions, query_vectors, strict=True):
         scores[question] = [
-            sum(a * b for a, b in zip(query_vector, doc)) for doc in document_vectors
+            sum(a * b for a, b in zip(query_vector, doc, strict=True))
+            for doc in document_vectors
         ]
     print(
         f"embedded {len(document_vectors)} chunks and {len(query_vectors)} queries "

@@ -105,10 +105,15 @@ async def test_the_loop_drains_the_queue_then_stops(
     assert result.scalar() == "ready"
 
 
-async def test_an_idle_queue_does_not_spin(
+async def test_an_idle_queue_sleeps_rather_than_spinning(
     session_factory, settings: Settings, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
-    """With nothing queued the loop sleeps and exits cleanly on the shutdown flag."""
+    """With nothing queued the loop waits out the poll interval instead of hot-looping.
+
+    The sleep is injected rather than patched onto the `asyncio` module: replacing
+    `asyncio.sleep` globally would change the behaviour of every other coroutine in the
+    process, the database driver's included.
+    """
     import queryll_worker.runner as runner_module
 
     monkeypatch.setattr(runner_module, "build_embedder", lambda _s: FakeEmbedder())
@@ -116,16 +121,12 @@ async def test_an_idle_queue_does_not_spin(
 
     shutdown = ShutdownSignal()
     sleeps: list[float] = []
-    original_sleep = runner_module.asyncio.sleep
 
-    async def counting_sleep(delay: float) -> None:
+    async def recording_sleep(delay: float) -> None:
         sleeps.append(delay)
         shutdown.request()
-        await original_sleep(0)
 
-    monkeypatch.setattr(runner_module.asyncio, "sleep", counting_sleep)
-
-    assert await run_forever(settings, shutdown) == 0
+    assert await run_forever(settings, shutdown, sleep=recording_sleep) == 0
     assert sleeps == [settings.poll_interval_seconds]
 
 

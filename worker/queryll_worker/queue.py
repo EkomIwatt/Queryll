@@ -14,8 +14,8 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from sqlalchemy import delete, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -195,7 +195,7 @@ async def commit_chunks(
                     "heading_path": candidate.heading_path,
                     "embedding": list(vector),
                 }
-                for candidate, vector in zip(candidates, vectors)
+                for candidate, vector in zip(candidates, vectors, strict=True)
             ],
         )
 
@@ -208,7 +208,7 @@ async def commit_chunks(
             chunk_count=len(candidates),
             page_count=page_count,
             error_message=None,
-            indexed_at=dt.datetime.now(dt.timezone.utc),
+            indexed_at=dt.datetime.now(dt.UTC),
         )
     )
     await session.execute(
@@ -218,7 +218,7 @@ async def commit_chunks(
             state=JobState.DONE,
             last_error=None,
             locked_at=None,
-            updated_at=dt.datetime.now(dt.timezone.utc),
+            updated_at=dt.datetime.now(dt.UTC),
         )
     )
     return True
@@ -251,7 +251,7 @@ async def fail_document(
             state=JobState.FAILED,
             last_error=(detail or user_message)[:1000],
             locked_at=None,
-            updated_at=dt.datetime.now(dt.timezone.utc),
+            updated_at=dt.datetime.now(dt.UTC),
         )
     )
     logger.warning("document failed %s", kv(document=str(document_id), reason=detail))
@@ -285,7 +285,7 @@ async def requeue_job(
             locked_at=None,
             locked_by=None,
             last_error=(detail or "")[:1000] or None,
-            updated_at=dt.datetime.now(dt.timezone.utc),
+            updated_at=dt.datetime.now(dt.UTC),
         )
     )
     logger.info("job requeued %s", kv(document=str(document_id), reason=detail))
