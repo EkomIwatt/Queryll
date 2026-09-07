@@ -1,0 +1,35 @@
+[project]
+name = "queryll-worker"
+version = "1.0.0"
+description = "Queryll ingestion worker — parses, chunks and embeds uploaded documents."
+requires-python = ">=3.11"
+
+# Dependencies live in requirements.txt / requirements-dev.txt: this process is deployed as a
+# Render Background Worker from a Dockerfile, not published as a package, so pinned
+# requirements files are the honest source of truth. This file exists for tool configuration.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:queryll_worker.*"]
+markers = [
+    "postgres: needs the pgvector database from docker-compose (host port 5433)",
+]
+
+[tool.ruff]
+line-length = 96
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+plugins = []
+
+[[tool.mypy.overrides]]
+module = ["pdfplumber.*", "pdfminer.*", "pgvector.*", "reportlab.*", "pypdf.*"]
+ignore_missing_imports = true
