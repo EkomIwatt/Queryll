@@ -626,7 +626,41 @@ does not error, and it does not hide the citation — a historical answer keeps 
 <!-- Instances write structured requests + *proposed* amendments here. Never edit the frozen
      contract block or another instance's section directly. The human resolves. -->
 
-(empty at start)
+### [AMENDMENT] 2026-09-07 — Instance 2
+**Type:** gap
+**Re:** Contract 7 §3 — the `error` SSE event
+**Issue:** The frame is specified as `event: error { "error": "<sentence>", "code": str }`, but the
+legal values of `code` are never enumerated anywhere in the contracts. `error` is already defined as a
+human-readable sentence that is safe to render, so `code` can only exist for the client to branch on —
+and Instance 3 is building its stream reader against this shape right now without being told what it
+may branch on. Left unpinned, Instance 3 invents a set, I invent a different set, and the mismatch
+stays invisible until a real mid-stream failure in production.
+**Proposed resolution:** Add to Contract 7 §3 the closed set this instance currently emits —
+`"retrieval_unavailable"` (Voyage failed after the stream opened), `"answer_unavailable"` (Anthropic
+errored, was unreachable, or declined), `"internal_error"` (anything else) — plus the standing rule
+that Instance 3 renders `error` verbatim and treats an unrecognised `code` as `internal_error`, so the
+set can be extended later without breaking a deployed client.
+**Blocked work:** none — continuing other work. The API emits those three codes today and the `error`
+sentence is renderable without `code` at all.
+**Status:** OPEN
+
+### [ESCALATION] 2026-09-07 — Instance 2
+**Type:** question
+**Re:** Contract 4 — "`input_type` support must be verified against the live API on first implementation"
+**Issue:** I cannot perform this verification. It needs a live `VOYAGE_API_KEY`, which is not present
+in this worktree, and spending the human's Voyage quota on a third-party API call is not a decision I
+should take unprompted. The contract assigns the check to first implementation, so I am flagging that
+it has NOT happened rather than leaving it looking done.
+**Proposed resolution:** human to decide — either make one live call to
+`https://api.voyageai.com/v1/embeddings` with `{"model": "voyage-4", "input_type": "query",
+"output_dtype": "float", "input": ["probe"]}` and confirm a 1024-dimension unit vector comes back, or
+accept that ★ merge-time check 5 already covers it, since the cross-process cosine probe exercises
+both real clients and would fail if either side's `input_type` were being rejected.
+**Blocked work:** none — continuing other work. What exists instead: `input_type: "query"` is always
+sent, and a 400 whose body mentions `input_type` raises `VoyageInputTypeRejected` rather than retrying
+without the parameter — Contract 4 requires an escalation at that point, not a silent fallback, and
+dropping it on the query side alone would decorrelate every query vector from every stored chunk vector.
+**Status:** OPEN
 
 ---
 
@@ -712,7 +746,7 @@ Follow the `swarm-worker` runtime protocol for all shared-file, escalation, and 
 
 ---
 
-## INSTANCE 2 — Retrieval, Answer API & Auth  ·  STATUS: PENDING
+## INSTANCE 2 — Retrieval, Answer API & Auth  ·  STATUS: DONE
 
 **Owns:** `backend/` in full — `app/` (models, schemas, routers, auth, documents, retrieval, the Voyage query
 client, the Claude answer service, SSE streaming, citations, errors, config, database), `backend/tests/`,
@@ -794,7 +828,80 @@ validation are pure functions — test them without a database or a network.
 Follow the `swarm-worker` runtime protocol for all shared-file, escalation, and git rules.
 
 **Work log:**
-(instance writes only here)
+
+**2026-09-07 — Instance 2 — DONE.** `backend/` complete on branch `instance/api`. 180 tests green
+against real Postgres 16 + pgvector. No test calls the live Voyage or Anthropic API; both keys are
+actively unset in `conftest.py` so a stray real call fails loudly rather than quietly spending quota.
+
+*What was built.* FastAPI + SQLAlchemy 2 (async) + asyncpg + Pydantic v2. All five produced contracts
+are implemented in full: Contract 1 auth (argon2 + HS256 + rotating httpOnly refresh cookie, carried
+over unchanged), Contract 6 documents (upload, list, detail, chunks, chunk-with-neighbours, re-index,
+delete), Contract 7 ask (retrieval + SSE), Contract 8 citations, Contract 9 error envelope and CORS.
+Every route in Contracts 1, 6 and 7 exists at the specified path and method.
+
+*The four decisions a merger should look at first.*
+1. **Generation runs in a background asyncio task feeding a queue, not in the response generator.**
+   Contract 7 §8 says a client that disconnects mid-stream must still get a persisted message. Driving
+   the model from inside the generator would let Starlette cancel generation on disconnect. Tested by
+   walking away mid-stream and asserting the finished answer lands in the database.
+2. **The work is split either side of the response headers.** Auth, ownership, query embedding,
+   retrieval and the user-message write all happen before `StreamingResponse` is constructed, so a
+   Voyage outage is a 503 with an envelope rather than an `error` frame inside a 200 the UI has already
+   started painting. After the headers, every failure is an in-stream `error` event.
+3. **There is no compression middleware anywhere in the app, deliberately.** Contract 7 §1 requires the
+   ask route to be excluded from compression; having nothing to exclude it from is the version that
+   cannot be reintroduced by accident. Noted in `app/main.py` and the README for whoever assembles the
+   production stack.
+4. **`app/services/documents.py::reindex_document` is the only function in this instance that writes a
+   worker-owned column**, and only from `ready`/`failed`, all in one transaction. Uploads insert the
+   `documents` row and its `ingestion_jobs` row in the same transaction (Contract 3 §2).
+
+*Finding, from the ★ HNSW check — worth Instance 1 and the Reconciler knowing.* The index test failed
+on first run, and correctly. `EXPLAIN` with only `enable_seqscan = off` showed the planner reaching the
+retrieval query through `chunks_document_idx` and then **sorting** by cosine distance — no HNSW scan.
+Investigated rather than assumed: the cause is cost, not an operator mismatch. On a few hundred fixture
+rows, reading everything and sorting is genuinely cheaper than an index scan, and that is true even
+with no filter at all. With `enable_sort = off` added, the real query — join to `documents` and all —
+uses `Index Scan using chunks_embedding_idx` as the outer of a nested loop, which is the right shape.
+The L2 negative control still cannot use it and falls back to a Sort priced at ~1e10. **So the query
+shape is correct and the join does not block the index**, but be aware the test proves *usability*, not
+that the planner picks it under production cost. ★ check 9 (EXPLAIN ANALYZE over a few thousand real
+chunks at default settings) remains the one that answers that, and it is not redundant.
+
+*Consumed contracts — what I assumed about Instance 1's output.* Chunks have contiguous 0-based
+`ordinal` per document (the neighbours route walks by ordinal). `page_start`/`page_end` are 1-based
+inclusive and both NULL for `.txt`/`.md`. `heading_path` is NULL rather than confidently wrong.
+`error_message` is non-null exactly when `status = 'failed'` and is user-facing copy rendered verbatim.
+Chunk `text` is the exact extracted slice. If any of those turn out otherwise, the citation UI is where
+it will show.
+
+*Contract surfaces to double-check at merge.* (a) The `retrieval` event's `sources` array is
+`Citation` verbatim including `similarity` rounded to 3dp and `snippet` ≤ 300 chars — worth diffing
+against Instance 3's hand-written `src/api/types.ts`. (b) Timestamps are ISO-8601 UTC with a literal
+trailing `Z`, not `+00:00`. (c) Ids cross the wire as strings everywhere. (d) `document_ids: null` means
+all documents; `[]` is read literally as zero documents and takes the `insufficient_context` path.
+(e) Both `code` values on the `error` event and the live `input_type` verification are OPEN escalations
+above.
+
+*Deliberate deviations from assigned-skill defaults, all contract-driven.* `api-designer` wants RFC 7807
+`application/problem+json`; Contract 9 freezes `{"error": "<sentence>"}` and the contract wins.
+`rag-architect` wants hybrid BM25 + a reranker; Contract 7 §4 ratifies pure dense cosine and both would
+be amendments, so neither was added — they are the obvious next quality lever once `top_k` and the floor
+are tuned. `fastapi-expert` wants `X | None`; this machine has Python 3.9 only and SQLAlchemy 2 and
+Pydantic v2 both evaluate annotations at runtime, so `Optional[...]` is used uniformly. Production pins
+3.12 in the Dockerfile; the Anthropic SDK is imported lazily so the whole suite runs on 3.9 without it.
+
+*One producer-side normalization worth naming.* Models emit `[1, 2]` despite instruction; the marker
+filter rewrites it to `[1][2]`. Output stays exactly contract-shaped — only single `[n]` markers ever
+reach the client — but it is a transformation Instance 3 did not ask for and should know about.
+
+*ASSUMED and remaining limits* are listed in full at the end of `backend/README.md`. The load-bearing
+ones: `top_k=8` / floor `0.35` / per-doc cap `4` / history `6` are all tunable config, not constants;
+refresh tokens cannot be revoked server-side because Contract 2 has no token table (a schema change
+would be an escalation, not an edit); duplicate signup email returns 409 and an empty upload returns
+422, neither of which Contract 9 enumerates explicitly; and the prompt-cache breakpoint is declared but
+almost certainly does not hit yet, since the instruction block is shorter than the minimum cacheable
+prefix — verify with `usage.cache_read_input_tokens` rather than assuming it works.
 
 ---
 

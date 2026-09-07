@@ -1,0 +1,13 @@
+# Queryll API — development / test dependencies.
+#
+#   pip install -r requirements-dev.txt
+#
+# Deliberately excludes `anthropic`: no test in this suite may call the live Anthropic
+# or Voyage APIs (Contract 4 test-suite rule), the SDK is imported lazily, and it does
+# not install on Python 3.9. On Python >= 3.10 add `pip install anthropic` on top to
+# smoke-import app/answer/claude_client.py against the real SDK.
+
+-r requirements-base.txt
+
+pytest>=8.2
+pytest-asyncio>=0.23
