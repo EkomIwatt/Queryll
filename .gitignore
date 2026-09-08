@@ -26,3 +26,6 @@ build/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local-only scratch notes (machine-specific: ports, throwaway test accounts)
+LOCAL-NOTES.md
