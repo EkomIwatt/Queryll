@@ -77,8 +77,8 @@ database. To see the interface with no backend and no API keys at all:
 cd frontend && VITE_MOCK_API=1 npm run dev
 ```
 
-Full deployment instructions — Vercel, Render, Neon, and the one misconfiguration that fails
-silently — are in **[DEPLOY.md](DEPLOY.md)**.
+Full instructions — running the real stack, deploying the UI, hosting constraints, and the one
+misconfiguration that fails silently — are in **[DEPLOY.md](DEPLOY.md)**.
 
 ## Tests
 
