@@ -62,7 +62,13 @@ Then the UI:
 cd frontend && npm install && npm run dev      # http://localhost:5173
 ```
 
-`frontend/.env` needs `VITE_API_BASE_URL=http://localhost:8000` (no trailing slash).
+`frontend/.env` needs `VITE_API_BASE_URL=http://localhost:8001` (no trailing slash).
+
+**The API is on host port 8001, not 8000**, the same way the database is on 5433 rather than 5432: a
+Windows vendor service (`Manager.exe`) holds 8000 on this machine. The container still listens on 8000
+internally — only the host mapping moves — so nothing inside the app changes. `frontend/.env.example`
+still shows 8000, which is the right default for a machine without that conflict; check
+`docker compose ps` for what the API is actually mapped to before setting `VITE_API_BASE_URL`.
 
 `db/init.sql` runs automatically the first time the volume is empty — it creates the `vector` and
 `pgcrypto` extensions and the whole schema, so there is no separate migration step. There is no
