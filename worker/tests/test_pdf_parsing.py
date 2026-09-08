@@ -14,6 +14,8 @@ import pytest
 from queryll_worker.errors import PermanentIngestError
 from queryll_worker.parsing import extract, extract_pdf
 from queryll_worker.parsing.base import BlockKind
+from queryll_worker.parsing.pdf import _collect_rows, _open_pdf
+from queryll_worker.parsing.pdf_layout import find_gutter, find_running_rows
 from tests.conftest import fixture_bytes
 
 RUNNING_HEADER = "Retrieval Quality in Grounded Question Answering"
@@ -89,6 +91,42 @@ def test_sentences_survive_the_column_and_page_breaks_intact(paper) -> None:  # 
         "Chunks of roughly 512 tokens with 64 tokens of overlap outperformed both",
     ):
         assert sentence in " ".join(paper.text.split())
+
+
+def test_the_gutter_is_found_on_the_dense_two_column_pages() -> None:
+    """`test_columns_are_read_in_the_right_order` samples page 1, and page 1 is the easy page.
+
+    Pages 2 and 3 are solid two-column body text, and that is where detection actually gets
+    hard. A Row groups words by vertical position, so on a dense page almost every row holds
+    words from *both* columns: its x0 is in the left column and its x1 in the right. A check
+    asking whether a row lies *wholly* on one side answers "neither" for exactly the pages
+    this function exists to detect, the gutter is discarded, the page is read as one column,
+    and the two streams interleave line by line into text like
+
+        "The evaluation harness was contrasted with an The retrieval layer was contrasted
+         with an ablation with ablation with overlap removed entirely."
+
+    Nothing else in this suite notices, because every structural invariant survives it: the
+    garbled text is deterministic and still slices back to its own offsets. So this asserts
+    the layout property directly rather than sampling prose, which is what let the bug hide.
+
+    Page 4 is excluded deliberately -- its right column is genuinely empty, so returning None
+    there is correct and reading it as a single column is right.
+    """
+    pdf = _open_pdf(fixture_bytes("paper_two_column.pdf"))
+    rows, page_count, _ = _collect_rows(pdf, max_pages=500)
+    running = find_running_rows(rows, page_count)
+    kept = [row for index, row in enumerate(rows) if index not in running]
+    widths = {number: float(page.width) for number, page in enumerate(pdf.pages, start=1)}
+
+    for page_number in (1, 2, 3):
+        page_rows_ = [row for row in kept if row.page == page_number]
+        gutter = find_gutter(page_rows_, widths[page_number])
+        assert gutter is not None, (
+            f"page {page_number} is two-column but no gutter was found, so its columns "
+            f"interleave"
+        )
+        assert 0.25 < (gutter / widths[page_number]) < 0.75
 
 
 def test_a_word_hyphenated_across_a_line_break_is_rejoined(paper) -> None:  # type: ignore[no-untyped-def]

@@ -68,8 +68,12 @@ services:
       RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-8}
       RETRIEVAL_MIN_SIMILARITY: ${RETRIEVAL_MIN_SIMILARITY:-0.35}
       RETRIEVAL_PER_DOCUMENT_CAP: ${RETRIEVAL_PER_DOCUMENT_CAP:-4}
+    # HOST PORT IS 8001, NOT 8000. A Windows vendor service (Manager.exe) holds 8000 on this
+    # machine, the same way Snipp holds 5432 for the database. The container still listens on
+    # 8000 internally — only the host mapping moves — so nothing inside the app changes.
+    # The frontend must therefore use VITE_API_BASE_URL=http://localhost:8001.
     ports:
-      - "8000:8000"
+      - "8001:8000"
     restart: unless-stopped
 
   # The ingestion worker — a Render *Background Worker* in production: no port, no health

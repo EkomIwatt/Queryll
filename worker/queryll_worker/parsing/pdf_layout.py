@@ -259,8 +259,25 @@ def find_gutter(rows: Sequence[Row], page_width: float) -> float | None:
 
     centre_x = best[1]
     # Both sides must hold real text, or this is a wide indent rather than a gutter.
-    on_left = sum(1 for row in rows if row.x1 <= centre_x)
-    on_right = sum(1 for row in rows if row.x0 >= centre_x)
+    #
+    # Counted per *word*, not per row's extent. A Row groups words by vertical position, so on
+    # a dense two-column page almost every row holds words from BOTH columns: its x0 sits in
+    # the left column and its x1 in the right. Asking whether a row lies *wholly* on one side
+    # therefore answers "neither" for exactly the pages this function exists to detect — the
+    # better-formed the layout, the more certainly it was rejected. On the four-page fixture
+    # that left pages 2 and 3 with 2/1 and 1/1 qualifying rows against a minimum of 3, so the
+    # gutter was discarded, the page was read as one column, and the two column streams were
+    # interleaved line by line into the chunk text. Page 1 survived only because its right
+    # column is partly empty.
+    #
+    # A page whose right column is genuinely empty (the last page of a paper) still fails this
+    # test, which is correct: it really is single-column, and reading it as one is right.
+    on_left = sum(
+        1 for row in rows if any(float(word["x1"]) <= centre_x for word in row.words)
+    )
+    on_right = sum(
+        1 for row in rows if any(float(word["x0"]) >= centre_x for word in row.words)
+    )
     if min(on_left, on_right) < _MIN_ROWS_PER_COLUMN:
         return None
     return centre_x
