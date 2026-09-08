@@ -1,0 +1,10 @@
+# Queryll API — Instance 2 — production dependencies.
+#
+# Production target is Python 3.12 (see Dockerfile).
+# Install for local development on Python 3.9 with `requirements-dev.txt` instead:
+# `anthropic>=1.0` below requires Python >= 3.10 and will not resolve on 3.9.
+
+-r requirements-base.txt
+
+# Answering (Contract 7). Imported lazily by app/answer/claude_client.py.
+anthropic>=1.0.0,<2.0.0
