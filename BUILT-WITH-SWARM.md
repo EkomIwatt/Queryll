@@ -149,6 +149,24 @@ moment both of them build one.
 The mitigation that worked was not a test. It was the decision, made before any code existed, that
 a cross-process probe was mandatory at merge and that no green suite could substitute for it.
 
+### The fix
+
+Instance 1 had documented its fake as "part of the cross-instance contract" and spelled the
+algorithm out step by step — it was written to be shared, and nothing on the other side knew that.
+So that algorithm was adopted on both sides, and Contract 4's test-suite rule was amended to pin it
+as contract text rather than offer it as an example.
+
+Verified after the change:
+
+- the two fakes are **bit-identical** on every probe (cosine `1.000000000`),
+- the API suite is still **194 green** — nothing depended on the old fixture vectors,
+- all three chunks of a worker-ingested document retrieve at **rank 1** through the real API,
+- and an unrelated question still returns **zero** passages, so the grounding rule was tightened
+  into correctness rather than loosened into a false positive.
+
+One file changed. The interesting part was never the fix — it was that finding it required running
+two real processes against one real database, because that was the only place the defect existed.
+
 ## What no test could prove
 
 Five boundaries were known in advance to be unprovable before merge, written up as merge-time

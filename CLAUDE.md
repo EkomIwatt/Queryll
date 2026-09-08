@@ -329,9 +329,19 @@ tracked in `DEPLOY.md`, not per row).
 | `conversations.* / messages.*` | **Instance 2** | — |
 
 **The one ratified exception:** on re-index (Contract 6 §5) Instance 2 sets `documents.status = 'pending'`,
-`progress = 0.0`, `error_message = NULL`, deletes that document's chunks, and inserts a fresh job row — all in
-one transaction. This is the only circumstance in which Instance 2 writes a worker-owned column, and it is
-only legal when the document's current status is `ready` or `failed` (never `processing`).
+`progress = 0.0`, `error_message = NULL`, `chunk_count = NULL`, `indexed_at = NULL`, deletes that document's
+chunks, and inserts a fresh job row — all in one transaction. This is the only circumstance in which Instance 2
+writes a worker-owned column, and it is only legal when the document's current status is `ready` or `failed`
+(never `processing`).
+
+**AMENDED 2026-09-08 (human, at merge).** `chunk_count` and `indexed_at` were added to the list above. The
+original exception named only the first three, but a re-index deletes the chunks — so leaving `chunk_count`
+and `indexed_at` set would advertise the size and timestamp of an index that no longer exists. Both instances
+found this independently and from opposite sides: Instance 2's transaction already cleared both, and Instance 1
+added a defensive clear at run start *precisely because it assumed Instance 2 cleared neither*. Two independent
+readings converging on the same fix is evidence the contract under-specified the exception, not that either
+implementation overreached. `page_count` deliberately still survives a re-index: it describes the file, not the
+index.
 
 **§2 — Enqueue is transactional.** Instance 2 inserts the `documents` row and its `ingestion_jobs` row in the
 **same transaction**. A committed document without a job is an unreachable state, not a race to paper over.
@@ -427,8 +437,31 @@ Raise, do not warn, and never store or query with a vector that fails either che
   rejected, **escalate** — do not silently drop it. Dropping it on one side only is precisely the asymmetry
   this contract exists to prevent.
 - **Test-suite rule:** no test may call the live Voyage API. Both instances use a deterministic fake embedder
-  (e.g. seeded hash → 1024 floats → L2-normalize) that satisfies both assertions. The real client is exercised
-  only by the ★ merge-time probe.
+  that satisfies both assertions. The real client is exercised only by the ★ merge-time probe.
+
+- **AMENDED 2026-09-08 (human, at merge) — the fake embedder is pinned, not exemplified.** This clause
+  originally read "*e.g.* seeded hash → 1024 floats → L2-normalize", and both instances built a fake that
+  honoured it. **They built different functions**, and the two were mutually orthogonal (measured cosine
+  ≈ 0.045). Both were deterministic, both returned exactly 1024 dimensions, both were exactly L2-normalized —
+  so both satisfied *every assertion above*, and neither test suite could possibly have caught it. The
+  Reconciler found it at merge by running the real worker and the real API against one database: retrieval
+  returned **zero** passages and the integrated app answered "I could not find anything about that in your
+  documents" to every question, with all 441 tests green.
+
+  The algorithm below is therefore **contract text**. Both instances implement exactly this, and a change to
+  it is an escalation:
+
+  ```python
+  seed = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
+  rng  = random.Random(seed)
+  raw  = [rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)]
+  vec  = [x / math.sqrt(math.fsum(c * c for c in raw)) for x in raw]
+  ```
+
+  **The general rule this is an instance of:** when two independently-written programs must agree about the
+  meaning of a number, every artifact that stands in for that number is part of the interface between them —
+  **including the test double**. Pinning the provider, the model id and the dimension was not enough, because
+  divergence arrived through the one place the contract was deliberately loose.
 
 ### Contract 5: Chunking specification
 
@@ -533,6 +566,21 @@ event: error          { "error": "<sentence>", "code": str }                    
 `retrieval` is sent **before the model is called**, so the UI paints the sources it is about to answer from
 while the answer is still being generated. `citations_used` lists the 1-based indices actually referenced in
 the final text, so the UI can dim sources the answer did not use.
+
+**AMENDED 2026-09-08 (human, at merge) — the `error` event's `code` is a closed set.** It was never
+enumerated, which Instance 2 raised while Instance 3 was building its stream reader against the shape. The
+legal values are:
+
+| `code` | Meaning |
+|---|---|
+| `retrieval_unavailable` | Voyage failed after the stream had already opened |
+| `answer_unavailable` | Anthropic errored, was unreachable, or declined |
+| `internal_error` | anything else |
+
+**A client renders `error` verbatim and must treat an unrecognised `code` as `internal_error`**, so the set can
+be extended later without breaking a deployed client. No code changed on either side to adopt this: the API
+already emitted exactly these three, and Instance 3 never branched on `code` at all — it types the field as an
+open string and defaults a missing one to `unknown`, which already satisfies the extensibility rule.
 
 **§4 — Retrieval parameters.**
 
@@ -651,7 +699,10 @@ that Instance 3 renders `error` verbatim and treats an unrecognised `code` as `i
 set can be extended later without breaking a deployed client.
 **Blocked work:** none — continuing other work. The API emits those three codes today and the `error`
 sentence is renderable without `code` at all.
-**Status:** OPEN
+**Status:** RESOLVED 2026-09-08 (human, at merge) — **accepted as proposed.** Contract 7 §3 now enumerates the
+three codes and the unknown-code rule. The Reconciler confirmed before the ruling that Instance 3 had **not**
+invented a competing set: `frontend/src/api/sse.ts:158` types `code` as an open string and defaults a missing
+one to `unknown`. Zero code change on either side.
 
 ### [ESCALATION] 2026-09-07 — Instance 2
 **Type:** question
@@ -723,6 +774,46 @@ state machines.
 amended to show the retry edge. Instance 1's implementation already matches the ratified reading, so no
 code changed on either side; the Reconciler verified `requeue_job(reset_document=True)` is the default
 in `worker/queryll_worker/queue.py:268`.
+
+
+### [FINDING] 2026-09-08 — Reconciler, at merge
+**Type:** contract gap, found and fixed at merge
+**Re:** Contract 4 — the deterministic fake embedder
+
+**Issue.** Contract 4's test-suite rule specified the fake embedder by example ("*e.g.* seeded hash → 1024
+floats → L2-normalize"). Both instances built one, honouring the clause. **They built different functions:**
+
+* Instance 1 — `random.Random(sha256(text)[:8]).gauss()` × 1024
+* Instance 2 — iterated `sha256` blocks → uint16 → scaled to [−1, 1]
+
+Both deterministic, both exactly 1024 dimensions, both exactly L2-normalized. **Both therefore satisfied every
+assertion Contract 4 mandates**, which is exactly why neither test suite could catch it. They were mutually
+orthogonal — measured cosine 0.045 / −0.022 / 0.005.
+
+**Consequence, proven through the real data path** (real worker ingesting into Postgres, real API retrieval
+querying it, two processes sharing only the database):
+
+| Question embedded with | Passages | Result |
+|---|---|---|
+| Instance 2's fake (as merged) | **0** | `insufficient_context` — every question refused |
+| Instance 1's fake | **1**, similarity **1.0** | correct chunk, rank 1 |
+
+Same database, same chunks, same retrieval code, same query bytes. The only variable was which fake embedded
+the question. The second row is the useful half: it proves **everything else in the two-process pipeline was
+correct on the first try** — enqueue, claim, parse, chunk, embed, store, HNSW, cosine ordering, tenant scope,
+floor, per-document cap, citation projection.
+
+Production was never affected — both sides use the real Voyage client, and the fakes are test-only. No contract
+was violated; the clause said "e.g.". But this is the precise shape of the failure this project was designed
+around, and it arrived through the one place the contract was deliberately loose.
+
+**Resolution (human, at merge): adopt Instance 1's algorithm on both sides.** `backend/app/embeddings/fake.py`
+now implements it byte-identically; Contract 4's test-suite rule is amended to pin the algorithm as contract
+text rather than an example. Verified after the change: the two fakes are **bit-identical** on every probe
+(cosine 1.000000000), the API suite is still 194 green, and all three chunks of a worker-ingested document
+retrieve at **rank 1** through the real API — while an unrelated question still correctly returns zero
+passages, so the grounding rule was not weakened into a false positive.
+**Status:** RESOLVED
 
 ---
 
