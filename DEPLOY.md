@@ -39,28 +39,40 @@ actually proves the two processes agree.
 ## 1. Neon (Postgres 16 + pgvector)
 
 1. Create a Neon project. Note the connection string.
-2. **Enable the extensions before first boot.** Neon does not create them for you, and the API and
-   worker will both fail to start without them:
+2. **Apply the schema.** `db/init.sql` is the single source of truth — there is no Alembic in this
+   project and no `create_all` against a real database. It also creates the two extensions itself
+   (`vector` and `pgcrypto`, at the top of the file), so this one step is all that is needed before
+   first boot. Both services fail to start without them.
 
-   ```sql
-   CREATE EXTENSION IF NOT EXISTS vector;
-   CREATE EXTENSION IF NOT EXISTS pgcrypto;
-   ```
-
-3. Apply the schema. `db/init.sql` is the single source of truth — there is no Alembic in this
-   project and no `create_all` against a real database:
+   **You do not need `psql` installed.** The dev database container already has it, so run this
+   **from the repo root**, where `db/init.sql` is:
 
    ```bash
-   psql "$NEON_URL" -f db/init.sql
+   docker exec -i queryll-db psql "$NEON_URL" < db/init.sql
    ```
 
-4. Convert the URL for SQLAlchemy's async driver. Neon hands you `postgresql://...`; both Python
-   services need **`postgresql+asyncpg://...`**, and asyncpg does not accept `?sslmode=require` as
-   a query parameter — drop it (asyncpg negotiates TLS on its own):
+   - `-i`, **not** `-it` — `-t` allocates a TTY and breaks the pipe.
+   - The `< db/init.sql` redirect is read by *your* shell, not the container, which is why the path
+     is local and why the working directory matters.
+   - No Docker? Neon's web console has a **SQL Editor**. Paste the file contents in and run it.
+
+   Verify with `docker exec -i queryll-db psql "$NEON_URL" -c "\dt"` — six tables: `users`,
+   `documents`, `chunks`, `ingestion_jobs`, `conversations`, `messages`.
+
+3. **Two URL forms, and they are not interchangeable.** Neon hands you one connection string; the
+   command above and the Python services need it in different shapes.
+
+   | Used by | Form | `sslmode` |
+   |---|---|---|
+   | `psql` (the step above) | `postgresql://...` — Neon's string **as given** | **keep** `?sslmode=require` |
+   | API + worker (`DATABASE_URL`) | `postgresql+asyncpg://...` | **strip it** — asyncpg rejects it as a query parameter and negotiates TLS on its own |
 
    ```
    DATABASE_URL=postgresql+asyncpg://user:pass@ep-xxx.region.aws.neon.tech/queryll
    ```
+
+   Passing the `+asyncpg` form to `psql`, or leaving `sslmode` on for asyncpg, both fail with errors
+   that point at the driver rather than at the URL.
 
 The HNSW index in `init.sql` is created on an empty table, which is correct and fast. It fills as
 chunks are written.
@@ -124,7 +136,7 @@ legal option: it must be the exact origins.
 
 ## 5. Order of operations
 
-1. Neon: extensions, then `db/init.sql`.
+1. Neon: create the project, then apply `db/init.sql` (which creates the extensions too).
 2. Worker (Background Worker) — so nothing sits `pending` the moment uploads start working.
 3. API (Web Service).
 4. Vercel, pointed at the API.
