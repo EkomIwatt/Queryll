@@ -1,0 +1,18 @@
+# Queryll ingestion worker — runtime dependencies.
+#
+# This process has no web framework, no HTTP server and no broker. It talks to exactly two
+# things: Postgres (its queue and its storage) and the Voyage embeddings API.
+
+SQLAlchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+pgvector==0.3.6
+
+httpx==0.28.1
+
+# PDF text extraction. pdfplumber (MIT, on pdfminer.six) is used rather than PyMuPDF because it
+# exposes per-character font size, font name and page coordinates, which is what makes running
+# header/footer stripping and font-based heading detection possible at all — and because its
+# licence suits a portfolio project.
+pdfplumber==0.11.4
+
+python-dotenv==1.0.1

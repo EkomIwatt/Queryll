@@ -628,9 +628,56 @@ does not error, and it does not hide the citation — a historical answer keeps 
 
 (empty at start)
 
+### AMENDMENT 2026-09-07 — Instance 1
+**Type:** proposed-amendment
+**Re:** Contract 3 §4 (legal `documents.status` transitions)
+
+**Issue:** The state diagram gives `processing` exactly two exits — `ready` and `failed` — and
+shows `pending` being re-entered only by Instance 2's re-index. It does not say what
+`documents.status` should be when a job fails *transiently* and is put back on the queue with
+`attempts < 3` (Contract 3 §6). That path is real and routine: a Voyage 503 that survives the
+backoff schedule costs the job one attempt and the job returns to `queued`, but no worker is
+holding the document any more.
+
+Two readings, and the contract supports each in a different place:
+
+* **`processing` stays.** §4's diagram looks exhaustive, and the document is conceptually still
+  mid-ingestion.
+* **Back to `pending`.** §7 says progress "resets to 0.0 only on a transition back to
+  `pending`", which implies transitions back to `pending` exist beyond re-index — and a retry is
+  precisely where progress must reset, because the next run starts from zero.
+
+I implemented the second reading (`processing -> pending`, progress 0.0, job `queued`), on the
+grounds that `pending` means "waiting for a worker", which is exactly true after a requeue, and
+that §7 anticipates it. **This is not user-visible**: Contract 6 §4 has Instance 3 polling on
+both `pending` and `processing`, and both render as in-progress. It *is* visible to any
+stuck-job admin view Instance 2 builds, which is why it is worth pinning down rather than
+leaving to two independent guesses.
+
+**Proposed resolution:** add the retry edge to the §4 diagram, making the implemented behaviour
+explicit:
+
+```
+pending ──(worker claims)──> processing ──(all chunks written)──> ready
+                                  │
+                                  ├──(unrecoverable, or attempts >= 3)──> failed
+                                  └──(transient failure, attempts < 3)──> pending
+ready ─────(re-index, Instance 2)──> pending
+failed ────(re-index, Instance 2)──> pending
+```
+
+If the human prefers the first reading instead, the change on this side is one line in
+`worker/queryll_worker/queue.py::requeue_job` (`reset_document=False`), plus the two tests that
+assert it.
+
+**Blocked work:** none — implemented under the second reading, tested, and documented in the
+Instance 1 work log. Raised so the merge does not discover two instances assuming different
+state machines.
+**Status:** OPEN
+
 ---
 
-## INSTANCE 1 — Ingestion Worker & the Vector Pipeline  ·  STATUS: PENDING
+## INSTANCE 1 — Ingestion Worker & the Vector Pipeline  ·  STATUS: DONE
 
 **Owns:** `worker/` in full — the poll loop, job claiming, document parsing (PDF/txt/md), text extraction,
 header/footer stripping, chunking, the Voyage embedding client, chunk writes, progress and status updates,
@@ -708,7 +755,114 @@ numerous. Commit at least one genuinely messy PDF fixture; a clean single-column
 Follow the `swarm-worker` runtime protocol for all shared-file, escalation, and git rules.
 
 **Work log:**
-(instance writes only here)
+
+**2026-09-07 — Instance 1 — STATUS: DONE.** Worker built, self-tested against the contracts,
+and exercised as a real process. 153 tests pass (36 of them against real Postgres/pgvector),
+`ruff` clean, `mypy --strict` clean on all 24 source files.
+
+*What was built, and where.* Everything lives under `worker/`, deployed as a Render Background
+Worker from `worker/Dockerfile` (no port, no health check). `parsing/` turns bytes into one
+canonical text — PDF column detection, running header/footer stripping, font-based heading
+detection, plus plain text and Markdown. `chunking/` splits that text on structure first and
+size second. `embeddings/` holds the Voyage client and the shared deterministic fake.
+`queue.py` carries the Contract 3 §3 claim statement verbatim and every write this process
+makes. `pipeline.py` and `runner.py` are per-job orchestration and the poll loop. `quality.py`
+plus `tools/quality_harness.py` are the retrieval-quality harness. `worker/README.md` explains
+the reasoning; this is the summary.
+
+*The decision worth knowing about.* **Chunks are spans, never rebuilt strings.** Every unit the
+packer moves is a `(char_start, char_end)` pair into the canonical text, and a chunk is
+`(first_unit.start, last_unit.end)`. Contract 5 §5's invariant —
+`text[c.char_start:c.char_end] == c.text` — is therefore true *by construction* rather than by
+careful arithmetic, which matters because the overlap logic is exactly where that invariant is
+normally lost to an off-by-one. It is property-tested over every fixture, and again through the
+database in `test_pipeline.py`.
+
+*Contract 4 is enforced, not commented.* Vectors are checked for dimension and unit norm at the
+boundary where they enter the program, written as an explicit `raise` rather than an `assert`
+(which `python -O` strips). A violation is **fatal to the process**: the runner requeues the job
+untouched, logs `CONTRACT 4 VIOLATION`, and exits non-zero. Failing documents one at a time
+would hide the real fault. `input_type="document"` is never dropped — a rejection surfaces a
+message saying to escalate. **No test calls the live Voyage API.**
+
+*Four defects that only the real thing surfaced,* all fixed and all now covered by tests:
+
+1. **Column detection looked for an *empty* gutter.** A full-width title puts ink straight
+   through one, so every two-column page read as single-column and the columns interleaved into
+   alternating half-sentences. The gutter is now the widest *low-coverage* valley, counted per
+   row, and a crossing row is classified by what it is anchored to.
+2. **Running headers were stripped after column splitting**, so a centred running title was cut
+   in half before it could be recognised as boilerplate. That pass now runs on rows, before
+   columns are worked out.
+3. **Chunking was quadratic.** `_is_boundary` sliced `text[:punct_index]` at every candidate
+   sentence boundary, copying the whole document once per sentence: a 2 MB text file took over
+   seven minutes. Bounded to a 48-character look-behind — the same file now chunks in 1.5s.
+   Contract 5 §1 permits 20 MB, so this would have blown the reclaim window on real uploads.
+   `test_chunking_a_large_document_stays_linear` guards the complexity class.
+4. **`db.create_engine` registered pgvector's asyncpg codec on top of the SQLAlchemy `Vector`
+   type**, double-converting every vector so no chunk insert could succeed. One conversion, in
+   one place.
+
+*A fifth defect, found while reviewing contract surfaces before merge.* `chunk_count` was
+only ever written on success, so a document whose **re-index failed** kept advertising the
+passage count of an index that no longer existed — Instance 2's re-index transaction deletes
+the chunks but writes only `status`, `progress` and `error_message` (Contract 3 §1). It is
+now cleared when a run begins. `page_count` deliberately survives: it describes the file, not
+the index. Contract 6 §1's `error_message` non-null *iff* `failed` invariant is now asserted
+across both terminal paths.
+
+*Two quality judgements Instance 3 will see in the UI.* A document's **title is demoted to
+content** when the evidence is unambiguous, so citations read `3. Methods > 3.2 Sampling` rather
+than `<Whole Paper Title> > 3. Methods > 3.2 Sampling`. And a chunk that opens before any
+heading takes the first heading it contains rather than carrying no path. Heading detection
+still **fails closed** — an unreliable signal turns the whole document's `heading_path` to NULL,
+because a wrong heading prints under a citation as if it were fact.
+
+*Verified against the real process, not only tests.* The worker boots, claims, ingests the
+four-page two-column fixture into 18 chunks (7 running header/footer lines stripped), writes
+`ready` with `progress = 1.0`, and goes idle. **The kill-the-worker check passes:** killed
+mid-run, the job stayed `running` with no chunks written; after the reclaim window it was picked
+up on attempt 2 and finished with exactly one set of 1200 chunks. The quality harness reports
+coverage 1.00, hit@1 1.00, MRR 1.000 on the messy fixture.
+
+*Deliberate choices a merger should not mistake for oversights.*
+- **No lock heartbeat.** A killed run's job stays `running` and the 15-minute window hands it
+  back. Refreshing `locked_at` would trade the contract's simple, testable recovery for a
+  hung-but-alive worker that never gets reclaimed.
+- **Token counts are estimates**, not Voyage BPE counts. Counting exactly means downloading a
+  tokenizer at runtime, which would make chunk boundaries depend on a network fetch and break
+  Contract 5 §4. `chunks.token_count` is therefore approximate by design — display metadata, and
+  nothing depends on it being exact.
+- **Auth failures from Voyage are treated as transient**, not permanent. A bad key is an operator
+  problem; permanently failing every user's uploads over it would be worse than retrying.
+- **The test suite uses its own database** (`queryll_worker_test`) on the shared container,
+  applied from the frozen `db/init.sql`. The `queryll` database belongs to everyone; truncating
+  its tables would have been reaching outside this lane.
+- **`tests/fixtures/.gitattributes` marks the PDFs binary.** Git's autocrlf would otherwise
+  rewrite them on checkout and corrupt the xref tables the determinism tests compare byte for
+  byte.
+
+*Contract surfaces to double-check at merge.* `chunks.*` and the `documents` lifecycle columns
+are the only things this instance writes; `heading_path`, `page_start`/`page_end` and
+`char_start`/`char_end` are what Instance 3 renders, so they are the ones worth eyeballing
+against a real citation. The `ingestion_jobs` claim statement is contract text and was not
+parameterised.
+
+*ASSUMED, and unresolved by design:*
+- **`input_type` has not been verified against the live Voyage API** — there is no key in this
+  worktree, and Contract 4 forbids a test from calling it. The client fails loudly rather than
+  silently dropping the parameter, and the ★ merge-time probe is where this gets settled.
+- **Nothing here can prove this worker and the API agree about what a vector means.** That is
+  the ★ cross-process cosine probe, and it is merge-time by construction.
+- Chunk shape (512/64/32) and the page and size limits are the contract's ASSUMED starting
+  values, unchanged; `tools/quality_harness.py --target-tokens/--overlap-tokens` is how to tune
+  them against real documents.
+
+**One amendment raised** (Contract 3 §4, above): the state machine does not say what
+`documents.status` becomes when a job is requeued after a *transient* failure with
+`attempts < 3`. I implemented `processing -> pending` and explained why there; it is not
+user-visible, but two instances guessing differently would be. Everything else in the
+frozen contracts was implementable exactly as written.
 
 ---
 
