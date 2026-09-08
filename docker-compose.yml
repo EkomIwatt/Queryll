@@ -1,25 +1,26 @@
-# Queryll — development & test database
+# Queryll — the whole system, one command.
 #
-# FROZEN ARTIFACT, committed to `main` at ratification alongside db/init.sql (Contract 2).
-# Owned by NO instance. All three instances need a database to develop and test against, and
-# none of them may own this file — do not edit it, do not add your service here.
+# The `db` service below is the FROZEN artifact committed to `main` at ratification alongside
+# db/init.sql (Contract 2), unchanged. The `api` and `worker` services were added at MERGE TIME
+# by the Reconciler, once both real Dockerfiles existed — exactly as the header of the ratified
+# file said they would be.
 #
-# The `api` and `worker` services are added at MERGE TIME by the human/Reconciler, once both
-# real Dockerfiles exist. Until then this file starts exactly one thing: Postgres with pgvector.
+#   docker compose up -d db              # just the database (what the three instances developed against)
+#   docker compose up --build            # the whole system: database + API + ingestion worker
+#   docker compose down -v               # stop and wipe the volume (re-runs init.sql on next up)
 #
-#   docker compose up -d db          # start it (host port 5433, NOT 5432)
-#   docker compose down -v           # stop it and wipe the volume (re-runs init.sql on next up)
+# HOST PORT IS 5433, NOT 5432. Snipp (project 1) already holds 5432 on this machine, so Queryll
+# is mapped one port up and both run side by side. Inside the compose network the services reach
+# Postgres at `db:5432` — the 5433 mapping is for tools on the host only.
 #
-# HOST PORT IS 5433. Snipp (project 1) already holds 5432 on this machine, so Queryll is mapped
-# one port up and both can run side by side. Instances 1 and 2 must use, in .env.example:
-#
-#   DATABASE_URL=postgresql+asyncpg://queryll:queryll@localhost:5433/queryll
-#
-# Note: db/init.sql runs ONLY when the data volume is empty. After a schema amendment is
-# ratified, `docker compose down -v` is what actually applies it.
+# db/init.sql runs ONLY when the data volume is empty. After a ratified schema amendment,
+# `docker compose down -v` is what actually applies it.
 #
 # There is no SQLite fallback in this project — SQLite cannot represent a `vector` column, so
 # every test that touches SQL runs against this container.
+#
+# The frontend is NOT here. It is a static Vite build deployed to Vercel; run it with
+# `npm run dev` in frontend/, pointed at http://localhost:8000 via VITE_API_BASE_URL.
 
 services:
   db:
@@ -39,6 +40,64 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # The API — a Render *Web Service* in production. Serves Contracts 1, 6, 7, 8, 9.
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: queryll-api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://queryll:queryll@db:5432/queryll
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me}
+      # Local dev is same-site over plain http, which cannot store a Secure cookie.
+      COOKIE_SECURE: "false"
+      COOKIE_SAMESITE: lax
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      # --- Contract 4. FROZEN. These three MUST be byte-identical to the worker's. ---
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:?VOYAGE_API_KEY must be set — the API embeds questions}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-voyage-4}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      # --- Answering (Contract 7) ---
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set — the API answers}
+      ANSWER_MODEL: ${ANSWER_MODEL:-claude-sonnet-5}
+      # --- Retrieval (Contract 7 §4) — ASSUMED starting values, tunable ---
+      RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-8}
+      RETRIEVAL_MIN_SIMILARITY: ${RETRIEVAL_MIN_SIMILARITY:-0.35}
+      RETRIEVAL_PER_DOCUMENT_CAP: ${RETRIEVAL_PER_DOCUMENT_CAP:-4}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  # The ingestion worker — a Render *Background Worker* in production: no port, no health
+  # check, no inbound anything. Its only interface is rows in Postgres (Contract 3).
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: queryll-worker
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://queryll:queryll@db:5432/queryll
+      # --- Contract 4. FROZEN. These three MUST be byte-identical to the API's. ---
+      # Same names, same defaults, two independently written clients. If these ever
+      # disagree, NOTHING CRASHES: retrieval quietly returns near-random passages and
+      # both test suites stay green. See DEPLOY.md, "The one that fails silently".
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:?VOYAGE_API_KEY must be set — the worker embeds chunks}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-voyage-4}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      EMBEDDING_PROVIDER: voyage
+      # --- Chunking (Contract 5) — a quality knob, not a constant. Re-index after a change. ---
+      CHUNK_TARGET_TOKENS: ${CHUNK_TARGET_TOKENS:-512}
+      CHUNK_OVERLAP_TOKENS: ${CHUNK_OVERLAP_TOKENS:-64}
+      CHUNK_MIN_TOKENS: ${CHUNK_MIN_TOKENS:-32}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    restart: unless-stopped
 
 volumes:
   queryll-pgdata:

@@ -360,10 +360,19 @@ orphaned by a killed process comes back; it is why ingestion must be **idempoten
 ```
 pending ──(worker claims)──> processing ──(all chunks written)──> ready
                                   │
-                                  └──(unrecoverable, or attempts >= 3)──> failed
+                                  ├──(unrecoverable, or attempts >= 3)──> failed
+                                  └──(transient failure, attempts < 3)──> pending
 ready ─────(re-index, Instance 2)──> pending
 failed ────(re-index, Instance 2)──> pending
 ```
+
+**AMENDED 2026-09-08** (ratified by the human at merge; raised by Instance 1 before it). The retry edge
+`processing -> pending` is explicit above. When a job fails *transiently* and is requeued with
+`attempts < 3`, the document returns to `pending` — "waiting for a worker", which is exactly true once
+no worker holds it — and `progress` resets to 0.0 with it, which is the transition §7 already
+anticipated. This is not user-visible: Contract 6 §4 has Instance 3 polling on both `pending` and
+`processing`, and both render as in-progress. It is visible to a stuck-job admin view, which is why it
+is pinned rather than left to two independent guesses.
 
 Nothing leaves `ready` except by re-index or deletion. `progress` moves monotonically upward within a single
 `processing` run and resets to 0.0 only on a transition back to `pending`. A `failed` document **must** have a
@@ -660,7 +669,10 @@ both real clients and would fail if either side's `input_type` were being reject
 sent, and a 400 whose body mentions `input_type` raises `VoyageInputTypeRejected` rather than retrying
 without the parameter — Contract 4 requires an escalation at that point, not a silent fallback, and
 dropping it on the query side alone would decorrelate every query vector from every stored chunk vector.
-**Status:** OPEN
+**Status:** RESOLVED 2026-09-08 (human, at merge) — **deferred to the ★ cross-process cosine probe.** No
+separate live call is made now. The probe exercises both real clients end to end and would fail if either
+side's `input_type` were rejected, so it subsumes this check. Both clients already fail loudly rather than
+dropping the parameter, which is what makes deferring it safe. Remains a pre-launch gate, not a closed item.
 
 ### AMENDMENT 2026-09-07 — Instance 1
 **Type:** proposed-amendment
@@ -707,7 +719,10 @@ assert it.
 **Blocked work:** none — implemented under the second reading, tested, and documented in the
 Instance 1 work log. Raised so the merge does not discover two instances assuming different
 state machines.
-**Status:** OPEN
+**Status:** RESOLVED 2026-09-08 (human, at merge) — **accepted as proposed.** Contract 3 §4 has been
+amended to show the retry edge. Instance 1's implementation already matches the ratified reading, so no
+code changed on either side; the Reconciler verified `requeue_job(reset_document=True)` is the default
+in `worker/queryll_worker/queue.py:268`.
 
 ---
 
