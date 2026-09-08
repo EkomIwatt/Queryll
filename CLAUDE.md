@@ -1075,7 +1075,7 @@ prefix — verify with `usage.cache_read_input_tokens` rather than assuming it w
 
 ---
 
-## INSTANCE 3 — Document Library & Answer UI  ·  STATUS: PENDING
+## INSTANCE 3 — Document Library & Answer UI  ·  STATUS: DONE
 
 **Owns:** `frontend/` in full — `src/` (auth shell, router, api client, SSE stream reader, library, uploader,
 document viewer, chat, citation components, design tokens), `frontend/tests/`, `package.json`, `vite.config.ts`,
@@ -1147,7 +1147,81 @@ types in `src/api/types.ts` from this file; do not generate them from a server y
 Follow the `swarm-worker` runtime protocol for all shared-file, escalation, and git rules.
 
 **Work log:**
-(instance writes only here)
+
+- **2026-09-07 — Instance 3 — started.** Read the coordination file in full; contracts confirmed FROZEN.
+  Restated domain: `frontend/` only. Consuming Contracts 1, 6, 7, 8, 9. Producing none.
+  Build order set: (1) contract types hand-written from this file, (2) the fake stream reader + real
+  `fetch`/`ReadableStream` SSE parser behind one interface, (3) API client + auth shell, (4) design tokens,
+  (5) library + polling discipline, (6) chat + citations + passage viewer. No backend in this worktree; the
+  entire UI is built against a mock API client and scripted SSE frames. — Instance 3
+
+- **2026-09-07 — Instance 3 — DONE.** The whole browser surface is built, self-tested against the
+  frozen contracts, and green: **92 tests across 8 suites**, `tsc -b` clean under `strict` +
+  `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`, production build clean (89 kB gzipped JS).
+
+  **Where it lives:** `frontend/` — `src/api` (contracts, client, SSE), `src/auth`, `src/library`,
+  `src/chat`, `src/passages`, `src/ui`, `src/dev`, `src/styles`, `tests/`, plus `vercel.json`,
+  `.env.example` and `frontend/README.md`. Nothing outside `frontend/` was touched except this
+  section and my own status flag.
+
+  **Built in the order the role prompt asked for.** The fake stream reader came first, before any
+  chat UI: `src/api/fakeStream.ts` ships three implementations of the one `AskStreamFn` the
+  production code uses — scripted (events on a timer), manual (the test emits each one by hand), and
+  raw-SSE (real bytes through the real `SseDecoder`, split at byte offsets the test chooses). The
+  third is the only one that can prove a frame, or a `[n]` marker, survives being torn in half by a
+  chunk boundary; that case is tested at eight different split points and at every byte.
+
+  **Contract surfaces a merger should double-check against Instance 2's real output:**
+  - **SSE frame shape (Contract 7 §2/§3).** I parse `event:`/`data:` with a spec-compliant
+    incremental decoder, swallow `: ping` comments, tolerate CRLF and multi-line `data`, **ignore**
+    unknown event names (forward-compatible) and **throw** on a known event with a malformed payload.
+    A `done` with no `message_id` is treated as a protocol error rather than silently dropped, since
+    dropping it would hang the UI forever.
+  - **Event ordering.** The UI is built on `retrieval` arriving exactly once and first. A `token`
+    before `retrieval` is rendered rather than discarded, but it is a contract violation and worth
+    catching at merge.
+  - **Error envelope (Contract 9).** Every non-2xx sentence is rendered verbatim, including
+    `documents.error_message`. If any endpoint returns a bare string, a stack trace, or FastAPI's
+    default `{"detail": ...}` instead of `{"error": "<sentence>"}`, the client falls back to its own
+    generic sentence and the server's real explanation is lost — worth one deliberate check per
+    status code (401 / 404 / 409 / 413 / 415 / 422 / 502 / 503).
+  - **Upload field name and status code.** `multipart/form-data`, field `file`, expecting `202` with
+    `page_count` and `chunk_count` null.
+  - **Chunk-route neighbours.** The passage viewer depends on `{ chunk, prev, next }` from
+    `GET /api/documents/{id}/chunks/{chunk_id}`, and on that route returning **404** (never 403) for
+    a chunk whose document is gone or has been re-indexed.
+  - **CORS.** The client sends `credentials: 'include'` on every route (not just the auth ones), so
+    the allow-list must name the exact Vercel origin — a wildcard will fail with credentials on.
+
+  **ASSUMED items for the human/Reconciler:**
+  1. **A persisted assistant message with `citations: []` is treated as the grounding-refusal path**
+     and re-rendered with the calm "no grounded answer" framing rather than as a plain answer. This
+     follows from Contract 7 §5 (below the floor, `sources: []`, Claude is never called) plus the
+     project rule that an answer with zero citations is otherwise a bug — but it is an inference, and
+     if Instance 2 ever persists a normal answer with an empty citation array it will read wrongly.
+  2. **`citations_used` is re-derived from the stored text's own markers** when a conversation is
+     read back, since Contract 7 §9 persists the full `Citation` array but not the used-index list.
+     Equivalent by definition (§3 defines `citations_used` as the indices actually referenced), but
+     it is a derivation rather than a value read from the server.
+  3. Conversation titles are mirrored locally from the first question (first 60 chars) so the rail
+     does not read "Untitled" until the next load; the server stays the authority. Contract 7 §9
+     already marks this ASSUMED.
+  4. `display_name` fallback is display-only, per Contract 1's own ASSUMED note.
+
+  **Things I deliberately did not do:** no endpoint was invented, no contract was edited, and no
+  types were generated from a server I cannot see — `src/api/types.ts` is hand-written from the
+  frozen block, with section references, and is the single typed place every test fixture flows
+  through. I raised no escalations because nothing in Contracts 1, 6, 7, 8 or 9 turned out to be
+  ambiguous enough to need one.
+
+  **One extra, clearly fenced:** `src/dev/mockBackend.ts` is an in-memory `QueryllApi` behind
+  `VITE_MOCK_API=1`, so the UI is demonstrable end-to-end (ingestion progression, streamed cited
+  answers, the refusal path) with no API process running. It is a demo for humans, explicitly not a
+  contract simulator, and no test uses it.
+
+  **Verified locally:** `npm test` (92/92), `npm run build`, and a dev-server smoke test with the
+  mock backend. Not verifiable from here and left to the merge-time ★ checks: SSE surviving the real
+  deploy path (check #8) and citation truthfulness against real answers (check #7). — Instance 3
 
 ---
 
