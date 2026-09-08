@@ -815,6 +815,80 @@ retrieve at **rank 1** through the real API — while an unrelated question stil
 passages, so the grounding rule was not weakened into a false positive.
 **Status:** RESOLVED
 
+
+### [FINDING] 2026-09-08 — Reconciler, post-merge, against the running system
+**Type:** defect found by a ★ merge-time check, fixed
+**Re:** Contract 5 §3 / §5 — column detection in `worker/queryll_worker/parsing/pdf_layout.py`
+
+**Found by ★ check #6** (real-PDF ingestion) against the deployed stack — not by any test, because no
+test could see it.
+
+`find_gutter` located the gutter correctly on every page, then discarded it at the final "both sides
+must hold real text" gate. That gate counted rows lying **wholly** on one side of the centre line. But
+a `Row` groups words by *vertical position*, so on a dense two-column page almost every row holds words
+from both columns — `x0` in the left column, `x1` in the right — and counts toward neither side. The
+check was inverted for its own purpose: **the better-formed and denser the two-column layout, the more
+certainly it was rejected.**
+
+| page | rows spanning the gutter | wholly-left / wholly-right | outcome |
+|---|---|---|---|
+| 1 | 28 / 59 | 14 / 17 | accepted |
+| 2 | **50 / 53** | **2 / 1** | rejected (minimum is 3) |
+| 3 | **50 / 52** | **1 / 1** | rejected |
+| 4 | 0 / 44 | 44 / 0 | rejected — correctly; its right column is genuinely empty |
+
+Page 1 survived only because its right column is partly empty. Pages 2+ were read as a single column,
+so the two streams interleaved line by line:
+
+> "The evaluation harness was contrasted with an The retrieval layer was contrasted with an ablation
+> with ablation with overlap removed entirely."
+
+That text is what got embedded and what would have appeared under a citation. **Second consequence,**
+unnoticed until the re-ingest: interleaving also destroyed subsection heading detection, so every chunk
+in section 6 was labelled `6.2` — 6.1, 6.3 and 6.4 were lost. Contract 5 §3 is explicit that a wrong
+heading is worse than no heading, because it prints under a citation as if it were fact. So the bug
+was violating that rule as well as the text rule.
+
+**Why 155 tests missed it.** Every structural invariant survives interleaving: the garbled text is
+deterministic, and `text[c.char_start:c.char_end] == c.text` is *true* for garbled text. The two
+existing column tests sample page 1 only. This is the same shape as the fake-embedder finding above —
+the invariants hold, the suite is green, the output is wrong.
+
+**Resolution (human, at merge): fixed.** Both sides are now counted per *word* — a row qualifies for a
+side if any of its words is on it. A regression test was added and **verified to fail on the previous
+code**; the first version of that test did not, because page 4 is legitimately single-column and carried
+the sampled sentences intact, so the assertion never isolated pages 2-3. It now asserts the layout
+property directly instead of sampling prose. Worker suite 155 → 156. Verified end to end: re-indexed the
+fixture through the real worker, 18 chunks → 20, subsections 6.1-6.4 all correctly attributed, and the
+previously garbled chunk reads as clean prose.
+**Status:** RESOLVED
+
+### [AMENDMENT] 2026-09-08 — Reconciler
+**Type:** proposed-amendment, ratified at merge
+**Re:** ★ merge-time check 5 — the cross-process embedding probe
+
+**Issue.** The check reads "embed one fixed probe string through the worker's real Voyage client and
+through the API's real Voyage client, and assert **cosine ≥ 0.99** and identical dimension." That
+assertion **can never pass**, because Contract 4 *defines* the two clients to use different
+`input_type` values — `"document"` on the worker, `"query"` on the API — and Voyage returns a
+different vector for each. Run against the real clients it measured **0.869**, which reads as a
+failure and is not one.
+
+**Proposed resolution, adopted.** The probe has two parts:
+
+1. **Model agreement** — embed the probe through both processes with **matched** `input_type` and
+   assert cosine ≥ 0.99 and identical dimension. This is what actually proves the two processes embed
+   into the same space. Measured **1.000000**.
+2. **`input_type` is live on both sides** — assert the asymmetric pair (worker `document` vs API
+   `query`) is *neither* ~1.0 *nor* ~0. A value near 1.0 would mean a side silently dropped
+   `input_type`; a value near 0 would mean the models diverged. Measured **0.869**, which is the
+   healthy band.
+
+Part 2 is the more interesting half: **the asymmetry is positive evidence.** It is what closes the
+Contract 4 escalation about verifying `input_type` against the live API, because it demonstrates not
+just that the parameter is accepted but that it measurably changes the vector on both sides.
+**Status:** RESOLVED
+
 ---
 
 ## INSTANCE 1 — Ingestion Worker & the Vector Pipeline  ·  STATUS: DONE
@@ -1347,11 +1421,17 @@ Deferred here deliberately (rule b): small, spanning all three sides, and best w
    one thing both processes had to do identically, and the check we built because no test could prove they did" is
    the most interesting engineering judgement here.
 4. **Root `README.md`** — replace the placeholder once the app exists.
-5. **★ The cross-process embedding probe** — the boundary no mock can prove. Embed one fixed probe string through
-   the worker's real Voyage client and through the API's real Voyage client, and assert cosine ≥ 0.99 and identical
-   dimension. Then the end-to-end version: ingest a document with the real worker, ask a question whose answer is in
-   a known paragraph, and confirm that paragraph's chunk is retrieved rank 1. If the probe passes but retrieval is
-   junk, the divergence is in `input_type`, not the model.
+5. **★ The cross-process embedding probe** — the boundary no mock can prove. Two parts, because the two clients are
+   *defined* to differ (AMENDED 2026-09-08; the original single assertion could never pass — see ESCALATIONS):
+   **(a) model agreement** — embed one fixed probe string through both processes with **matched** `input_type`, and
+   assert cosine ≥ 0.99 and identical dimension; this is what proves the two embed into the same space.
+   **(b) `input_type` is live on both sides** — assert the asymmetric pair (worker `document` vs API `query`) is
+   *neither* ~1.0 *nor* ~0: ~1.0 means a side silently dropped `input_type`, ~0 means the models diverged. The
+   asymmetry is positive evidence, and it is what settles the Contract 4 question about verifying `input_type`
+   against the live API. Then the end-to-end version: ingest a document with the real worker, ask a question whose
+   answer is in a known paragraph, and confirm that paragraph's chunk is retrieved rank 1. If (a) passes but
+   retrieval is junk, the divergence is in `input_type`, not the model.
+   *Result 2026-09-08: (a) 1.000000, (b) 0.869 — PASS on both.*
 6. **★ The real-PDF ingestion check** — ingest a genuinely messy PDF (multi-column, running headers, footnotes, a
    table). Confirm headers/footers were stripped, `page_start`/`page_end` match what a human sees on the page, and
    `heading_path` is either right or `NULL` — never confidently wrong.

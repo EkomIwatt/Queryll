@@ -177,10 +177,13 @@ wildcard is not a legal option.
 
 Do these in order. The first is the one that matters.
 
-1. **★ The cross-process embedding probe.** Embed one fixed string through the worker's real client
-   and through the API's real client; assert **cosine ≥ 0.99** and identical dimension. This is the
-   only check that proves the two processes agree about what a vector means, and no test in either
-   suite can do it — by construction, since neither may call the live API.
+1. **★ The cross-process embedding probe.** Two parts, because the two clients deliberately differ.
+   **(a)** Embed one fixed string through both processes with **matched** `input_type` and assert
+   **cosine ≥ 0.99** and identical dimension — this is what proves they embed into the same space.
+   **(b)** Check the real asymmetric pair (worker `document` vs API `query`) is neither ~1.0 nor ~0:
+   ~1.0 means a side silently dropped `input_type`, ~0 means the models diverged. Do **not** expect
+   ≥0.99 from (b) — Voyage returns a different vector per input type, and ~0.87 is the healthy band.
+   No test in either suite can do this, by construction: neither may call the live API.
 2. **★ End-to-end retrieval.** Upload a document, wait for `ready`, and ask a question whose answer
    is in a known paragraph. Confirm that paragraph's chunk comes back **rank 1**. If the probe in
    (1) passed but retrieval is junk, the divergence is in `input_type`, not the model — the worker
